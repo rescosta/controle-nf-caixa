@@ -1,0 +1,26 @@
+node_modules/
+out/
+release/
+dist/
+.DS_Store
+*.log
+
+# Banco de dados — contém senhas SMTP, certificados PFX e CNPJs
+*.db
+*.sqlite
+*.db-wal
+*.db-shm
+*.db-journal
+
+# Certificados e chaves digitais
+*.pfx
+*.p12
+*.pem
+*.key
+
+# Variáveis de ambiente
+.env
+.env.*
+
+# Configurações locais do Claude Code
+.claude/

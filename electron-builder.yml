@@ -1,0 +1,22 @@
+appId: com.controle.nf-caixa
+productName: Controle NF + Caixa
+directories:
+  output: release
+files:
+  - out/**/*
+asarUnpack:
+  - node_modules/better-sqlite3/**/*
+mac:
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  category: public.app-category.finance
+  icon: build/icon.icns
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.ico
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
