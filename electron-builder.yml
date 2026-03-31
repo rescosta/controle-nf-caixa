@@ -12,6 +12,7 @@ mac:
       arch: [arm64, x64]
   category: public.app-category.finance
   icon: build/icon.icns
+  artifactName: ${productName}-${version}-${arch}.dmg
 win:
   target:
     - target: nsis
