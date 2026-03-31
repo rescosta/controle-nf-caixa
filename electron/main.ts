@@ -14,6 +14,8 @@ import { sefazEmpresasQueries, sefazNfesQueries, sefazDestinatariosQueries } fro
 import { consultarSefaz } from './sefaz/consulta'
 import { manifestarCiencia } from './sefaz/manifestacao'
 import { sendSefazNfeEmail } from './email/sefazSender'
+import { nfseServicosQueries } from './database/queries/nfse'
+import { consultarNfse, verificarEventosNfse } from './nfse/consulta'
 
 function createWindow(): void {
   const isMac = process.platform === 'darwin'
@@ -49,6 +51,43 @@ app.whenReady().then(() => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
+
+  // Auto-importação diária de NFS-e (silenciosa, 3s após startup)
+  setTimeout(async () => {
+    try {
+      const hoje = new Date().toISOString().slice(0, 10)
+      const ultimaImportacao = settingsQueries.get('nfse_auto_import_data') ?? ''
+      if (ultimaImportacao === hoje) return
+
+      const empresas = sefazEmpresasQueries.list()
+      for (const empresa of empresas) {
+        if (!empresa.pfx_b64 || !empresa.pfx_senha) continue
+        try {
+          const emp = sefazEmpresasQueries.get(empresa.id) as ReturnType<typeof sefazEmpresasQueries.get> & { ultimo_nsu_nfse?: string }
+          if (!emp) continue
+          const resultado = await consultarNfse(emp)
+          for (const s of resultado.servicos) {
+            nfseServicosQueries.inserir({
+              empresa_id: empresa.id,
+              chave_acesso: s.chave_acesso,
+              nsu: s.nsu,
+              numero: s.numero,
+              serie: s.serie,
+              competencia: s.competencia,
+              prestador_cnpj: s.prestador_cnpj,
+              prestador_nome: s.prestador_nome,
+              valor_servicos: s.valor_servicos,
+              descricao: s.descricao,
+              xml_blob: s.xml,
+              fonte: 'adn',
+            })
+          }
+          sefazEmpresasQueries.atualizarNsuNfse(empresa.id, resultado.ultimoNsu)
+        } catch { /* ignora erros por empresa */ }
+      }
+      settingsQueries.set('nfse_auto_import_data', hoje)
+    } catch { /* ignora erros gerais */ }
+  }, 3000)
 })
 
 app.on('window-all-closed', () => {
@@ -612,4 +651,100 @@ function registerHandlers(): void {
   ipcMain.handle('sefaz:destinatarios:list', () => sefazDestinatariosQueries.list())
   ipcMain.handle('sefaz:destinatarios:create', (_, nome, email) => sefazDestinatariosQueries.create(nome, email))
   ipcMain.handle('sefaz:destinatarios:delete', (_, id) => sefazDestinatariosQueries.delete(id))
+
+  // ========== NFS-e Monitor (ADN Nacional) ==========
+
+  ipcMain.handle('nfse:servicos:list', (_, filtros) => nfseServicosQueries.list(filtros))
+  ipcMain.handle('nfse:servicos:anosDisponiveis', (_, empresaId) => nfseServicosQueries.anosDisponiveis(empresaId))
+  ipcMain.handle('nfse:servicos:buscarXml', (_, id) => nfseServicosQueries.buscarXml(id))
+  ipcMain.handle('nfse:servicos:togglePagamento', (_, id) => { nfseServicosQueries.togglePagamento(id); return true })
+  ipcMain.handle('nfse:servicos:marcarEmailEnviado', (_, id) => { nfseServicosQueries.marcarEmailEnviado(id); return true })
+
+  ipcMain.handle('nfse:consultar', async (event, empresaId: number) => {
+    const empresa = sefazEmpresasQueries.get(empresaId) as (ReturnType<typeof sefazEmpresasQueries.get> & { ultimo_nsu_nfse?: string }) | undefined
+    if (!empresa) throw new Error('Empresa não encontrada.')
+
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const onProgress = (msg: string) => win?.webContents.send('nfse:progress', msg)
+
+    const resultado = await consultarNfse(empresa, onProgress)
+
+    let novas = 0
+    for (const s of resultado.servicos) {
+      const inserida = nfseServicosQueries.inserir({
+        empresa_id: empresaId,
+        chave_acesso: s.chave_acesso,
+        nsu: s.nsu,
+        numero: s.numero,
+        serie: s.serie,
+        competencia: s.competencia,
+        prestador_cnpj: s.prestador_cnpj,
+        prestador_nome: s.prestador_nome,
+        valor_servicos: s.valor_servicos,
+        descricao: s.descricao,
+        xml_blob: s.xml,
+        fonte: 'adn',
+      })
+      if (inserida) novas++
+    }
+
+    sefazEmpresasQueries.atualizarNsuNfse(empresaId, resultado.ultimoNsu)
+    return { total: novas, temMais: resultado.temMais, debugRaw: resultado.debugRaw ?? '', ultimoNsu: resultado.ultimoNsu, paginas: resultado.paginas }
+  })
+
+  ipcMain.handle('nfse:reimportar', async (event, empresaId: number) => {
+    const empresa = sefazEmpresasQueries.get(empresaId) as (ReturnType<typeof sefazEmpresasQueries.get> & { ultimo_nsu_nfse?: string }) | undefined
+    if (!empresa) throw new Error('Empresa não encontrada.')
+
+    // Apaga todos os registros e reseta o NSU para forçar reimportação completa
+    nfseServicosQueries.deletarTodos(empresaId)
+    sefazEmpresasQueries.atualizarNsuNfse(empresaId, '0')
+
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const onProgress = (msg: string) => win?.webContents.send('nfse:progress', msg)
+
+    const empresaResetada = { ...empresa, ultimo_nsu_nfse: '0' }
+    const resultado = await consultarNfse(empresaResetada, onProgress)
+
+    let novas = 0
+    for (const s of resultado.servicos) {
+      const inserida = nfseServicosQueries.inserir({
+        empresa_id: empresaId,
+        chave_acesso: s.chave_acesso,
+        nsu: s.nsu,
+        numero: s.numero,
+        serie: s.serie,
+        competencia: s.competencia,
+        prestador_cnpj: s.prestador_cnpj,
+        prestador_nome: s.prestador_nome,
+        valor_servicos: s.valor_servicos,
+        descricao: s.descricao,
+        xml_blob: s.xml,
+        fonte: 'adn',
+      })
+      if (inserida) novas++
+    }
+
+    sefazEmpresasQueries.atualizarNsuNfse(empresaId, resultado.ultimoNsu)
+    return { total: novas, temMais: resultado.temMais, debugRaw: resultado.debugRaw ?? '', ultimoNsu: resultado.ultimoNsu, paginas: resultado.paginas }
+  })
+
+  // ========== NFS-e Eventos — Verificação de cancelamentos ==========
+  ipcMain.handle('nfse:verificarEventos', async (_, empresaId: number) => {
+    const empresa = sefazEmpresasQueries.get(empresaId) as ReturnType<typeof sefazEmpresasQueries.get> | undefined
+    if (!empresa || !empresa.pfx_b64 || !empresa.pfx_senha) throw new Error('Empresa sem certificado.')
+
+    const notas = nfseServicosQueries.listarParaEventos(empresaId)
+    let canceladas = 0
+
+    for (const nota of notas) {
+      const isCancelada = await verificarEventosNfse(empresa, nota.chave_acesso)
+      if (isCancelada) {
+        nfseServicosQueries.marcarCancelada(nota.id)
+        canceladas++
+      }
+    }
+
+    return { verificadas: notas.length, canceladas }
+  })
 }

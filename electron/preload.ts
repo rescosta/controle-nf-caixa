@@ -161,6 +161,24 @@ const api = {
     },
   },
 
+  // NFS-e Monitor
+  nfse: {
+    servicos: {
+      list:             (filtros?: Record<string, unknown>) => ipcRenderer.invoke('nfse:servicos:list', filtros),
+      anosDisponiveis:  (empresaId: number) => ipcRenderer.invoke('nfse:servicos:anosDisponiveis', empresaId),
+      buscarXml:           (id: number) => ipcRenderer.invoke('nfse:servicos:buscarXml', id),
+      togglePagamento:     (id: number) => ipcRenderer.invoke('nfse:servicos:togglePagamento', id),
+      marcarEmailEnviado:  (id: number) => ipcRenderer.invoke('nfse:servicos:marcarEmailEnviado', id),
+    },
+    consultar:        (empresaId: number) => ipcRenderer.invoke('nfse:consultar', empresaId),
+    reimportar:       (empresaId: number) => ipcRenderer.invoke('nfse:reimportar', empresaId),
+    verificarEventos: (empresaId: number) => ipcRenderer.invoke('nfse:verificarEventos', empresaId),
+    onProgress: (cb: (msg: string) => void) => {
+      ipcRenderer.on('nfse:progress', (_e, msg) => cb(msg))
+      return () => ipcRenderer.removeAllListeners('nfse:progress')
+    },
+  },
+
   // Email
   email: {
     test: () => ipcRenderer.invoke('email:test'),
