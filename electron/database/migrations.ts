@@ -435,6 +435,38 @@ export function runMigrations(db: Database.Database): void {
     `)
   }
 
+  // ========== NFS-e Monitor — NSU separado por empresa ==========
+  try { db.exec('ALTER TABLE sefaz_empresas ADD COLUMN ultimo_nsu_nfse TEXT DEFAULT \'0\'') } catch { /* já existe */ }
+
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nfse_servicos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        empresa_id INTEGER NOT NULL,
+        chave_acesso TEXT UNIQUE,
+        nsu TEXT,
+        numero TEXT,
+        serie TEXT,
+        competencia TEXT,
+        prestador_cnpj TEXT,
+        prestador_nome TEXT,
+        valor_servicos REAL DEFAULT 0,
+        descricao TEXT,
+        status_pagamento TEXT DEFAULT 'pendente',
+        data_pagamento TEXT,
+        xml_blob TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime'))
+      )
+    `)
+  } catch { /* tabela nfse_servicos já existe */ }
+
+  // Migração: fonte na tabela nfse_servicos (adn | bhiss)
+  try { db.exec("ALTER TABLE nfse_servicos ADD COLUMN fonte TEXT DEFAULT 'adn'") } catch { /* já existe */ }
+  // Migração: cancelada na tabela nfse_servicos
+  try { db.exec("ALTER TABLE nfse_servicos ADD COLUMN cancelada INTEGER DEFAULT 0") } catch { /* já existe */ }
+  // Migração: email_enviado na tabela nfse_servicos
+  try { db.exec("ALTER TABLE nfse_servicos ADD COLUMN email_enviado INTEGER DEFAULT 0") } catch { /* já existe */ }
+
   // ========== SEFAZ Monitor — tabelas isoladas (prefixo sefaz_) ==========
   try {
     db.exec(`

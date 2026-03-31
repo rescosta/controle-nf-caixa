@@ -68,6 +68,9 @@ export const sefazEmpresasQueries = {
   atualizarNsu(id: number, nsu: string): void {
     getDb().prepare('UPDATE sefaz_empresas SET ultimo_nsu = ? WHERE id = ?').run(nsu, id)
   },
+  atualizarNsuNfse(id: number, nsu: string): void {
+    getDb().prepare('UPDATE sefaz_empresas SET ultimo_nsu_nfse = ? WHERE id = ?').run(nsu, id)
+  },
   // Rate limiting
   getEstadoRateLimit(id: number): { count: number; data: string; cooldown: string } {
     const row = getDb()
