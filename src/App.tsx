@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react'
-import { FileText, Wallet, Settings, BarChart2, ZoomIn, ZoomOut, Sun, Moon, Minus, Square, X, Radio } from 'lucide-react'
+import { FileText, Wallet, Settings, BarChart2, ZoomIn, ZoomOut, Sun, Moon, Minus, Square, X, Radio, BookOpen } from 'lucide-react'
 import NFList from './pages/nf/NFList'
 import CaixaList from './pages/caixa/CaixaList'
 import ConfigPage from './pages/config/ConfigPage'
 import RelatorioList from './pages/relatorios/RelatorioList'
 import SefazPage from './pages/sefaz/SefazPage'
+import ManualPage from './pages/manual/ManualPage'
 
-type Tab = 'nf' | 'caixa' | 'relatorios' | 'sefaz' | 'config'
+type Tab = 'nf' | 'caixa' | 'relatorios' | 'sefaz' | 'config' | 'manual'
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('nf')
@@ -89,6 +90,7 @@ export default function App() {
         <NavTab id="relatorios" active={tab} icon={<BarChart2 size={16} />} label="Relatórios de Custo" onClick={setTab} />
         <NavTab id="sefaz" active={tab} icon={<Radio size={16} />} label="Monitor NF-e" onClick={setTab} />
         <div className="flex-1" />
+        <NavTab id="manual" active={tab} icon={<BookOpen size={16} />} label="Manual" onClick={setTab} />
         <NavTab id="config" active={tab} icon={<Settings size={16} />} label="Configurações" onClick={setTab} />
       </div>
 
@@ -99,6 +101,7 @@ export default function App() {
         {tab === 'relatorios' && <RelatorioList />}
         {tab === 'sefaz' && <SefazPage />}
         {tab === 'config' && <ConfigPage />}
+        {tab === 'manual' && <ManualPage />}
       </div>
     </div>
   )

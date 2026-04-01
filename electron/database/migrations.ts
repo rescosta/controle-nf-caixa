@@ -466,6 +466,69 @@ export function runMigrations(db: Database.Database): void {
   try { db.exec("ALTER TABLE nfse_servicos ADD COLUMN cancelada INTEGER DEFAULT 0") } catch { /* já existe */ }
   // Migração: email_enviado na tabela nfse_servicos
   try { db.exec("ALTER TABLE nfse_servicos ADD COLUMN email_enviado INTEGER DEFAULT 0") } catch { /* já existe */ }
+  // Migração: tipo na tabela nfse_servicos (emitida | recebida)
+  try { db.exec("ALTER TABLE nfse_servicos ADD COLUMN tipo TEXT DEFAULT 'recebida'") } catch { /* já existe */ }
+  // Migração: pis_cofins_retidos na tabela tributos_premissas
+  try { db.exec('ALTER TABLE tributos_premissas ADD COLUMN pis_cofins_retidos INTEGER DEFAULT 1') } catch { /* já existe */ }
+  // Backfill tipo: marca como 'emitida' os registros onde prestador_cnpj == cnpj da empresa consultada
+  try {
+    db.exec(`
+      UPDATE nfse_servicos SET tipo = 'emitida'
+      WHERE replace(replace(replace(prestador_cnpj,'.',''),'/',''),'-','') = (
+        SELECT replace(replace(replace(cnpj,'.',''),'/',''),'-','')
+        FROM sefaz_empresas
+        WHERE sefaz_empresas.id = nfse_servicos.empresa_id
+      )
+    `)
+  } catch { /* backfill falhou */ }
+
+  // ========== Tributos (Lucro Presumido) ==========
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS tributos_premissas (
+        id INTEGER PRIMARY KEY,
+        empresa_id INTEGER NOT NULL UNIQUE,
+        presuncao REAL DEFAULT 0.32,
+        aliq_irpj REAL DEFAULT 0.15,
+        aliq_adicional_ir REAL DEFAULT 0.10,
+        aliq_csll REAL DEFAULT 0.09,
+        limite_adicional REAL DEFAULT 60000,
+        aliq_pis REAL DEFAULT 0.0065,
+        aliq_cofins REAL DEFAULT 0.03,
+        aliq_irrf REAL DEFAULT 0.015,
+        aliq_csll_retida REAL DEFAULT 0.01,
+        pis_cofins_retidos INTEGER DEFAULT 1,
+        FOREIGN KEY (empresa_id) REFERENCES sefaz_empresas(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS tributos_historico (
+        id INTEGER PRIMARY KEY,
+        empresa_id INTEGER NOT NULL,
+        ano INTEGER NOT NULL,
+        trimestre INTEGER NOT NULL,
+        fat_mes1 REAL DEFAULT 0,
+        fat_mes2 REAL DEFAULT 0,
+        fat_mes3 REAL DEFAULT 0,
+        fat_total REAL DEFAULT 0,
+        base_irpj REAL DEFAULT 0,
+        irpj_bruto REAL DEFAULT 0,
+        adicional_ir REAL DEFAULT 0,
+        irrf_retido REAL DEFAULT 0,
+        irpj_a_recolher REAL DEFAULT 0,
+        csll_bruto REAL DEFAULT 0,
+        csll_retida REAL DEFAULT 0,
+        csll_a_recolher REAL DEFAULT 0,
+        pis REAL DEFAULT 0,
+        cofins REAL DEFAULT 0,
+        total_tributos REAL DEFAULT 0,
+        carga_efetiva REAL DEFAULT 0,
+        observacao TEXT,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        UNIQUE(empresa_id, ano, trimestre),
+        FOREIGN KEY (empresa_id) REFERENCES sefaz_empresas(id)
+      );
+    `)
+  } catch { /* tabelas tributos já existem */ }
 
   // ========== SEFAZ Monitor — tabelas isoladas (prefixo sefaz_) ==========
   try {

@@ -11,7 +11,6 @@ App Electron para gestão financeira de empresas brasileiras com múltiplas unid
 ## Como Rodar
 
 ```bash
-cd "/Users/renedesiqueiracosta/ClaudioApp/Controle NF_Caixa"
 npm install
 npm run dev          # modo desenvolvimento
 npm run build        # build para produção
@@ -26,24 +25,31 @@ npm run build:win    # gera instalador Windows (NSIS)
 ```
 Controle NF_Caixa/
 ├── electron/                        # Processo principal (Node.js)
-│   ├── main.ts                      # ~495 linhas — todos os handlers IPC
-│   ├── preload.ts                   # ~146 linhas — bridge contextBridge → window.api
+│   ├── main.ts                      # Todos os handlers IPC
+│   ├── preload.ts                   # Bridge contextBridge → window.api
 │   ├── database/
 │   │   ├── db.ts                    # Singleton SQLite (WAL mode, FK ativo)
-│   │   ├── migrations.ts            # ~200 linhas — criação e ALTER de tabelas
+│   │   ├── migrations.ts            # Criação e ALTER de tabelas (idempotente)
 │   │   └── queries/
 │   │       ├── cadastros.ts         # Empresas, unidades, CC, fornecedores, funcionários
 │   │       ├── nf.ts                # NF: list/get/create/update + parcelas + programação + stats
 │   │       ├── nfAnexos.ts          # Anexos de NF (PDF/imagens)
 │   │       ├── caixa.ts             # Caixas + lançamentos + refeições
 │   │       ├── relatorios.ts        # Relatórios de custo (CRUD de filtros salvos)
-│   │       └── settings.ts          # SMTP e outras configurações
+│   │       ├── settings.ts          # SMTP e outras configurações
+│   │       ├── sefaz.ts             # NF-e SEFAZ (empresas, notas, destinatários)
+│   │       ├── nfse.ts              # NFS-e ADN/BHISS (servicos, inserir, list com filtros)
+│   │       └── tributos.ts          # Lucro Presumido: premissas + histórico trimestral
 │   ├── email/
 │   │   ├── sender.ts                # nodemailer + workaround DNS do macOS/Electron
+│   │   ├── sefazSender.ts           # Envio de NF-e/NFS-e por e-mail
 │   │   └── pdfMerge.ts              # Merge PDF da NF com anexos
-│   └── export/
-│       ├── nfExcel.ts               # Exportação NF para Excel
-│       └── caixaExcel.ts            # Exportação Caixa para Excel
+│   ├── sefaz/                       # Integração SEFAZ NF-e
+│   │   ├── consulta.ts              # Webservice de distribuição de documentos
+│   │   └── manifestacao.ts          # Ciência da operação
+│   ├── nfse/                        # Integração ADN NFS-e
+│   │   └── consulta.ts              # API ADN + BHISS; determina tipo emitida/recebida
+│   └── bhiss/                       # Integração legada BHISS (BH)
 ├── src/                             # Renderer (React)
 │   ├── App.tsx                      # Shell: abas, titlebar, zoom (70-150%), tema dark/light
 │   ├── main.tsx                     # ReactDOM.createRoot
@@ -55,7 +61,7 @@ Controle NF_Caixa/
 │   ├── components/
 │   │   ├── Modal.tsx
 │   │   ├── SearchableSelect.tsx     # Select com busca (usado em fornecedores, etc.)
-│   │   ├── CurrencyInput.tsx        # Input de valor monetário formatado
+│   │   ├── CurrencyInput.tsx        # Input de valor monetário formatado (pt-BR)
 │   │   ├── ConfirmDialog.tsx
 │   │   └── EmptyState.tsx
 │   └── pages/
@@ -70,19 +76,26 @@ Controle NF_Caixa/
 │       │   ├── CaixaDetail.tsx      # Caixa aberto: lançamentos + refeições por funcionário
 │       │   ├── CaixaPrint.tsx
 │       │   └── RefeicoesMes.tsx     # Grid mensal de refeições (31 colunas × funcionários)
+│       ├── sefaz/
+│       │   ├── SefazPage.tsx        # Shell com sub-abas: NF-e | NFS-e | Impostos | Empresas
+│       │   ├── NfeMonitorPage.tsx   # Lista NF-e recebidas SEFAZ
+│       │   ├── NfseServicosPage.tsx # Lista NFS-e (emitidas/recebidas) com filtro de tipo
+│       │   ├── TributosPage.tsx     # Calculadora Lucro Presumido + histórico trimestral
+│       │   └── SefazEmpresasPage.tsx
 │       ├── relatorios/
 │       │   ├── RelatorioList.tsx
-│       │   └── RelatorioModal.tsx   # ~400 linhas — filtros avançados + gráficos
-│       └── config/
-│           ├── ConfigPage.tsx       # Sidebar de configurações
-│           ├── EmpresasConfig.tsx
-│           ├── UnidadesConfig.tsx
-│           ├── CentrosCustoConfig.tsx
-│           ├── FornecedoresConfig.tsx
-│           ├── FuncionariosConfig.tsx
-│           ├── EmailConfig.tsx      # SMTP + imagem de assinatura + senha de autorização
-│           ├── BackupConfig.tsx     # Backup/restauração + importação de cadastros
-│           └── NumeracaoConfig.tsx
+│       │   └── RelatorioModal.tsx   # Filtros avançados + gráficos
+│       ├── config/
+│       │   ├── ConfigPage.tsx       # Sidebar de configurações
+│       │   ├── EmpresasConfig.tsx
+│       │   ├── UnidadesConfig.tsx
+│       │   ├── CentrosCustoConfig.tsx
+│       │   ├── FornecedoresConfig.tsx
+│       │   ├── FuncionariosConfig.tsx
+│       │   ├── EmailConfig.tsx      # SMTP + imagem de assinatura + senha de autorização
+│       │   ├── BackupConfig.tsx     # Backup/restauração + importação de cadastros
+│       │   └── NumeracaoConfig.tsx
+│       └── manual/                  # Manual do usuário embutido
 ├── build/                           # Ícones (icon.icns, icon.ico)
 ├── package.json
 ├── electron.vite.config.ts
@@ -155,6 +168,56 @@ Grid de refeições por funcionário × mês: 31 colunas de dias + valor_unitár
 #### `relatorios_custo`
 Presets salvos de filtros para relatórios: nome + JSON de critérios.
 
+#### `sefaz_empresas`
+Empresas cadastradas para consulta SEFAZ/NFS-e: CNPJ, certificado A1 (pfx_b64 + pfx_senha), UF, ambiente, NSU de controle.
+
+#### `sefaz_nfes`
+NF-es recebidas via SEFAZ: chave de acesso, NSU, fornecedor, valor, XML completo, status de pagamento, email_enviado.
+
+#### `nfse_servicos`
+NFS-e consultadas via API ADN/BHISS.
+
+| Coluna | Descrição |
+|--------|-----------|
+| empresa_id | FK → sefaz_empresas |
+| chave_acesso | Unique — evita duplicatas |
+| tipo | `'emitida'` ou `'recebida'` — calculado comparando prestador_cnpj com empresa.cnpj |
+| fonte | `'adn'` ou `'bhiss'` — origem da importação |
+| competencia | Mês de competência (YYYY-MM) |
+| prestador_cnpj/nome | Dados do prestador |
+| valor_servicos | Valor da NFS-e |
+| cancelada | 0/1 |
+| email_enviado | 0/1 |
+
+#### `tributos_premissas`
+Uma linha por empresa. Criada automaticamente com defaults no primeiro acesso.
+
+| Coluna | Default | Descrição |
+|--------|---------|-----------|
+| presuncao | 0.32 | % de presunção sobre faturamento |
+| aliq_irpj | 0.15 | Alíquota IRPJ |
+| aliq_adicional_ir | 0.10 | Adicional IR sobre base > limite |
+| aliq_csll | 0.09 | Alíquota CSLL |
+| limite_adicional | 60000 | Limite trimestral do adicional IR |
+| aliq_pis | 0.0065 | Alíquota PIS |
+| aliq_cofins | 0.03 | Alíquota COFINS |
+| aliq_irrf | 0.015 | IRRF retido pelo tomador |
+| aliq_csll_retida | 0.01 | CSLL retida pelo tomador |
+| pis_cofins_retidos | 1 | 1 = PIS/COFINS 100% retidos na fonte (DARF = R$0) |
+
+#### `tributos_historico`
+Um registro por empresa × trimestre (`UNIQUE empresa_id, ano, trimestre`). Upsert via `INSERT OR REPLACE`.
+
+| Coluna | Descrição |
+|--------|-----------|
+| fat_mes1/2/3, fat_total | Faturamento por mês e total |
+| base_irpj | fat_total × presuncao |
+| irpj_bruto, adicional_ir, irrf_retido, irpj_a_recolher | Decomposição IRPJ |
+| csll_bruto, csll_retida, csll_a_recolher | Decomposição CSLL |
+| pis, cofins | Valores apurados (gross — independe de retenção) |
+| total_tributos | Total a recolher via DARF (IRPJ + CSLL + pis/cofins_a_pagar) |
+| carga_efetiva | (IRPJ + CSLL + PIS + COFINS) / fat_total |
+
 #### `settings`
 Chave-valor. Principais chaves:
 - `email_smtp_host`, `email_smtp_port`, `email_smtp_secure`
@@ -224,6 +287,50 @@ api.caixa.exportExcel(filtros)
 api.email.test()                           // Testa conexão SMTP
 api.email.sendNF({ to, html, nfSeq, nfId }) // Envia NF com PDF gerado + anexos
 api.email.validatePassword(senha)          // Verifica senha de autorização
+```
+
+### Monitor SEFAZ (NF-e)
+```typescript
+api.sefaz.empresas.list() / create(data) / update(id,data) / delete(id) / pickPfx()
+api.sefaz.nfes.list(filtros)
+api.sefaz.nfes.buscarXml(id)
+api.sefaz.nfes.togglePagamento(id)
+api.sefaz.nfes.marcarEmailEnviado(id)
+api.sefaz.nfes.exportarNF(payload)   // Exporta NF-e para Controle de NF
+api.sefaz.consultar(empresaId)        // Consulta webservice SEFAZ
+api.sefaz.email.enviar(dados)
+api.sefaz.destinatarios.list() / create(nome, email) / delete(id)
+api.sefaz.onProgress(cb)             // Listener de progresso (IPC event)
+```
+
+### Monitor NFS-e (ADN Nacional)
+```typescript
+api.nfse.servicos.list(filtros)          // filtros: empresa_id, tipo, fonte, competencia, busca
+api.nfse.servicos.anosDisponiveis(empresaId)
+api.nfse.servicos.buscarXml(id)
+api.nfse.servicos.togglePagamento(id)
+api.nfse.servicos.marcarEmailEnviado(id)
+api.nfse.consultar(empresaId)            // Busca NFS-e na API ADN; determina tipo emitida/recebida
+api.nfse.reimportar(empresaId)           // Reprocessa todas as NFS-e do zero
+api.nfse.verificarEventos(empresaId)
+api.nfse.exportarNF(payload)             // Exporta NFS-e recebida para Controle de NF
+api.nfse.onProgress(cb)                  // Listener de progresso (IPC event)
+```
+
+### Tributos (Lucro Presumido)
+```typescript
+api.tributos.getPremissas(empresa_id)
+  // → TributosPremissas (cria com INSERT OR IGNORE se não existir)
+api.tributos.savePremissas(empresa_id, data)
+api.tributos.getFaturamento(empresa_id, ano, trimestre)
+  // → { mes1, mes2, mes3 } — soma valor_servicos de nfse_servicos WHERE tipo='emitida' AND fonte='adn'
+api.tributos.salvarTrimestre(data)
+  // INSERT OR REPLACE INTO tributos_historico
+api.tributos.getHistorico(empresa_id)
+  // → TributosHistorico[] ORDER BY ano DESC, trimestre DESC
+api.tributos.getHistoricoTrimestre(empresa_id, ano, trimestre)
+  // → TributosHistorico | undefined
+api.tributos.deleteHistorico(id)
 ```
 
 ### Backup

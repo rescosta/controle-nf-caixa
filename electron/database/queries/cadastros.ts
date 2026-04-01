@@ -67,7 +67,11 @@ export const fornecedoresQueries = {
          WHERE id=@id`
       )
       .run({ ...data, id }),
-  delete: (id: number) => getDb().prepare('DELETE FROM fornecedores WHERE id = ?').run(id)
+  delete: (id: number) => getDb().prepare('DELETE FROM fornecedores WHERE id = ?').run(id),
+  findByCnpj: (cnpj: string) =>
+    getDb()
+      .prepare(`SELECT * FROM fornecedores WHERE replace(replace(replace(cnpj,'.',''),'/',''),'-','') = ?`)
+      .get(cnpj.replace(/\D/g, '')) as Record<string, unknown> | undefined,
 }
 
 // ---- FUNCIONARIOS ----

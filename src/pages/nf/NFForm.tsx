@@ -45,7 +45,13 @@ const EMPTY: Omit<NotaFiscal, 'id' | 'numero_seq'> = {
 
 export default function NFForm({ nf, empresas, unidades, ccs, minNFSeq, onClose, onSaved, onSavedAndNew }: Props) {
   const isFirstNF = (!nf && minNFSeq === null) || (nf !== null && nf.numero_seq === minNFSeq)
-  const [form, setForm] = useState({ ...EMPTY, ...(nf ?? {}), numero_seq: nf?.numero_seq ?? 1 })
+  const [form, setForm] = useState({
+    ...EMPTY,
+    ...(nf ?? {}),
+    // 'pendente' é status de importação — ao editar pela primeira vez converte para 'a_pagar'
+    status: nf?.status === 'pendente' ? 'a_pagar' : (nf?.status ?? EMPTY.status),
+    numero_seq: nf?.numero_seq ?? 1,
+  })
   const [fornecedores, setFornecedores] = useState<Fornecedor[]>([])
   const [localCCs, setLocalCCs] = useState<CentroCusto[]>(ccs)
   const [parcelas, setParcelas] = useState<NFParcela[]>([])

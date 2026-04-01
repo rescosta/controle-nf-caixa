@@ -39,7 +39,13 @@ export const nfQueries = {
     if (filters?.unidade_id) { conds.push('nf.unidade_id = @unidade_id'); params.unidade_id = filters.unidade_id }
     if (filters?.centro_custo_id) { conds.push('nf.centro_custo_id = @centro_custo_id'); params.centro_custo_id = filters.centro_custo_id }
     if (filters?.fornecedor_id) { conds.push('nf.fornecedor_id = @fornecedor_id'); params.fornecedor_id = filters.fornecedor_id }
-    if (filters?.status) { conds.push('nf.status = @status'); params.status = filters.status }
+    if (filters?.status) {
+      if (filters.status === 'a_pagar') {
+        conds.push("nf.status IN ('a_pagar','pendente')")
+      } else {
+        conds.push('nf.status = @status'); params.status = filters.status
+      }
+    }
     if (filters?.data_inicio) { conds.push('nf.vencimento >= @data_inicio'); params.data_inicio = filters.data_inicio }
     if (filters?.data_fim) { conds.push('nf.vencimento <= @data_fim'); params.data_fim = filters.data_fim }
 
@@ -176,9 +182,9 @@ export const nfQueries = {
     const base = conds.length ? 'AND ' + conds.join(' AND ') : ''
 
     return {
-      total_a_pagar: (db.prepare(`SELECT COALESCE(SUM(valor_boleto),0) as v FROM notas_fiscais WHERE status='a_pagar' ${base}`).get(params) as { v: number }).v,
-      vencendo_hoje: (db.prepare(`SELECT COUNT(*) as c FROM notas_fiscais WHERE status='a_pagar' AND vencimento=@hoje ${base}`).get({ ...params, hoje }) as { c: number }).c,
-      vencidos: (db.prepare(`SELECT COUNT(*) as c FROM notas_fiscais WHERE status='a_pagar' AND vencimento<@hoje ${base}`).get({ ...params, hoje }) as { c: number }).c,
+      total_a_pagar: (db.prepare(`SELECT COALESCE(SUM(valor_boleto),0) as v FROM notas_fiscais WHERE status IN ('a_pagar','pendente') ${base}`).get(params) as { v: number }).v,
+      vencendo_hoje: (db.prepare(`SELECT COUNT(*) as c FROM notas_fiscais WHERE status IN ('a_pagar','pendente') AND vencimento=@hoje ${base}`).get({ ...params, hoje }) as { c: number }).c,
+      vencidos: (db.prepare(`SELECT COUNT(*) as c FROM notas_fiscais WHERE status IN ('a_pagar','pendente') AND vencimento<@hoje ${base}`).get({ ...params, hoje }) as { c: number }).c,
     }
   }
 }
