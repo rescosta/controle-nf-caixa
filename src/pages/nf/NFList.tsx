@@ -260,11 +260,13 @@ export default function NFList() {
                       <td>
                         {n.status === 'pago'
                           ? <span className="badge-green">Pago{n.data_pagamento ? ` ${formatDate(n.data_pagamento)}` : ''}</span>
+                          : n.status === 'pendente'
+                          ? <span className="px-2 py-0.5 rounded text-xs font-medium bg-slate-700 text-slate-400">Pendente</span>
                           : <span className="badge-yellow">A Pagar</span>}
                       </td>
                       <td>
                         <div className="flex gap-1">
-                          {n.status === 'a_pagar' && (
+                          {(n.status === 'a_pagar' || n.status === 'pendente') && (
                             <button className="btn-ghost btn-sm p-1.5 text-green-400 hover:bg-green-900/30" title="Marcar como pago" onClick={() => { setPagandoId(n.id); setDataPagamento(today()) }}>
                               <CheckCircle size={14} />
                             </button>

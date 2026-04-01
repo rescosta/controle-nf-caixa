@@ -15,6 +15,7 @@ import { consultarSefaz } from './sefaz/consulta'
 import { manifestarCiencia } from './sefaz/manifestacao'
 import { sendSefazNfeEmail } from './email/sefazSender'
 import { nfseServicosQueries } from './database/queries/nfse'
+import { tributosQueries } from './database/queries/tributos'
 import { consultarNfse, verificarEventosNfse } from './nfse/consulta'
 
 function createWindow(): void {
@@ -669,8 +670,10 @@ function registerHandlers(): void {
 
     const resultado = await consultarNfse(empresa, onProgress)
 
+    const cnpjEmpresa = empresa.cnpj.replace(/\D/g, '')
     let novas = 0
     for (const s of resultado.servicos) {
+      const tipo = s.prestador_cnpj.replace(/\D/g, '') === cnpjEmpresa ? 'emitida' : 'recebida'
       const inserida = nfseServicosQueries.inserir({
         empresa_id: empresaId,
         chave_acesso: s.chave_acesso,
@@ -684,6 +687,9 @@ function registerHandlers(): void {
         descricao: s.descricao,
         xml_blob: s.xml,
         fonte: 'adn',
+        tipo,
+        cancelada: 0,
+        email_enviado: 0,
       })
       if (inserida) novas++
     }
@@ -706,8 +712,10 @@ function registerHandlers(): void {
     const empresaResetada = { ...empresa, ultimo_nsu_nfse: '0' }
     const resultado = await consultarNfse(empresaResetada, onProgress)
 
+    const cnpjEmpresaR = empresa.cnpj.replace(/\D/g, '')
     let novas = 0
     for (const s of resultado.servicos) {
+      const tipo = s.prestador_cnpj.replace(/\D/g, '') === cnpjEmpresaR ? 'emitida' : 'recebida'
       const inserida = nfseServicosQueries.inserir({
         empresa_id: empresaId,
         chave_acesso: s.chave_acesso,
@@ -721,12 +729,131 @@ function registerHandlers(): void {
         descricao: s.descricao,
         xml_blob: s.xml,
         fonte: 'adn',
+        tipo,
+        cancelada: 0,
+        email_enviado: 0,
       })
       if (inserida) novas++
     }
 
     sefazEmpresasQueries.atualizarNsuNfse(empresaId, resultado.ultimoNsu)
     return { total: novas, temMais: resultado.temMais, debugRaw: resultado.debugRaw ?? '', ultimoNsu: resultado.ultimoNsu, paginas: resultado.paginas }
+  })
+
+  // ========== NFS-e → Exportar para Controle de NF ==========
+  ipcMain.handle('nfse:exportarNF', (_, payload: {
+    nfse: Record<string, unknown>
+    empresaId: number
+    unidadeId: number | null
+    centroCustoId: number | null
+  }) => {
+    const { nfse, empresaId, unidadeId, centroCustoId } = payload
+
+    // Lookup ou criação automática de fornecedor pelo CNPJ
+    const cnpjPrestador = String(nfse.prestador_cnpj ?? '')
+    let fornecedorId: number | null = null
+    if (cnpjPrestador) {
+      const forn = fornecedoresQueries.findByCnpj(cnpjPrestador)
+      if (forn) {
+        fornecedorId = forn.id as number
+      } else {
+        const novo = fornecedoresQueries.create({
+          nome: nfse.prestador_nome ?? cnpjPrestador,
+          cnpj: cnpjPrestador,
+          banco: null, agencia: null, conta: null, pix: null,
+          telefone_fixo: null, celular: null, email: null, contato: null,
+        })
+        fornecedorId = Number(novo.lastInsertRowid)
+      }
+    }
+
+    // Competência YYYY-MM → data YYYY-MM-01
+    const competencia = String(nfse.competencia ?? '')
+    const nfData = competencia.length >= 7 ? `${competencia}-01` : new Date().toISOString().slice(0, 10)
+
+    // Vencimento = competência + 30 dias
+    const vencimento = new Date(new Date(nfData).getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+
+    const valor = Number(nfse.valor_servicos ?? 0)
+    const today = new Date().toISOString().slice(0, 10)
+
+    const result = nfQueries.create({
+      empresa_id: empresaId || null,
+      unidade_id: unidadeId || null,
+      centro_custo_id: centroCustoId || null,
+      fornecedor_id: fornecedorId,
+      nf_numero: nfse.numero || null,
+      nf_data: nfData,
+      descricao: nfse.descricao ? String(nfse.descricao).slice(0, 2000) : null,
+      valor_nota: valor,
+      valor_boleto: valor,
+      vencimento,
+      status: 'pendente',
+      data_pagamento: null,
+      data_lancamento: today,
+      forma_pagamento: 'boleto',
+      pix_chave: null,
+      banco_pagamento: null,
+      agencia_pagamento: null,
+      conta_pagamento: null,
+    })
+
+    return { id: Number(result.lastInsertRowid) }
+  })
+
+  // ========== NF-e SEFAZ → Exportar para Controle de NF ==========
+  ipcMain.handle('sefaz:nfes:exportarNF', (_, payload: {
+    nfe: Record<string, unknown>
+    empresaId: number
+    unidadeId: number | null
+    centroCustoId: number | null
+  }) => {
+    const { nfe, empresaId, unidadeId, centroCustoId } = payload
+
+    const cnpjForn = String(nfe.fornecedor_cnpj ?? '')
+    let fornecedorId: number | null = null
+    if (cnpjForn) {
+      const forn = fornecedoresQueries.findByCnpj(cnpjForn)
+      if (forn) {
+        fornecedorId = forn.id as number
+      } else {
+        const novo = fornecedoresQueries.create({
+          nome: nfe.fornecedor_nome ?? cnpjForn,
+          cnpj: cnpjForn,
+          banco: null, agencia: null, conta: null, pix: null,
+          telefone_fixo: null, celular: null, email: null, contato: null,
+        })
+        fornecedorId = Number(novo.lastInsertRowid)
+      }
+    }
+
+    const nfData = String(nfe.nf_data ?? new Date().toISOString().slice(0, 10))
+    const vencimento = new Date(new Date(nfData).getTime() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+    const valor = Number(nfe.valor_nota ?? 0)
+    const today = new Date().toISOString().slice(0, 10)
+
+    const result = nfQueries.create({
+      empresa_id: empresaId || null,
+      unidade_id: unidadeId || null,
+      centro_custo_id: centroCustoId || null,
+      fornecedor_id: fornecedorId,
+      nf_numero: nfe.nf_numero || null,
+      nf_data: nfData,
+      descricao: null,
+      valor_nota: valor,
+      valor_boleto: valor,
+      vencimento,
+      status: 'pendente',
+      data_pagamento: null,
+      data_lancamento: today,
+      forma_pagamento: 'boleto',
+      pix_chave: null,
+      banco_pagamento: null,
+      agencia_pagamento: null,
+      conta_pagamento: null,
+    })
+
+    return { id: Number(result.lastInsertRowid) }
   })
 
   // ========== NFS-e Eventos — Verificação de cancelamentos ==========
@@ -746,5 +873,31 @@ function registerHandlers(): void {
     }
 
     return { verificadas: notas.length, canceladas }
+  })
+
+  // ========== Tributos — Previsão Lucro Presumido ==========
+  ipcMain.handle('tributos:getPremissas', (_, empresa_id: number) =>
+    tributosQueries.getPremissas(empresa_id)
+  )
+  ipcMain.handle('tributos:savePremissas', (_, empresa_id: number, data: Record<string, unknown>) => {
+    tributosQueries.savePremissas(empresa_id, data as never)
+    return true
+  })
+  ipcMain.handle('tributos:getFaturamento', (_, empresa_id: number, ano: number, trimestre: number) =>
+    tributosQueries.getFaturamentoTrimestre(empresa_id, ano, trimestre)
+  )
+  ipcMain.handle('tributos:salvarTrimestre', (_, data: Record<string, unknown>) => {
+    tributosQueries.salvarHistorico(data as never)
+    return true
+  })
+  ipcMain.handle('tributos:getHistorico', (_, empresa_id: number) =>
+    tributosQueries.getHistorico(empresa_id)
+  )
+  ipcMain.handle('tributos:getHistoricoTrimestre', (_, empresa_id: number, ano: number, trimestre: number) =>
+    tributosQueries.getHistoricoTrimestre(empresa_id, ano, trimestre)
+  )
+  ipcMain.handle('tributos:deleteHistorico', (_, id: number) => {
+    tributosQueries.deleteHistorico(id)
+    return true
   })
 }

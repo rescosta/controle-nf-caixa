@@ -145,6 +145,7 @@ const api = {
       buscarXml: (id: number) => ipcRenderer.invoke('sefaz:nfes:buscarXml', id),
       togglePagamento: (id: number) => ipcRenderer.invoke('sefaz:nfes:togglePagamento', id),
       marcarEmailEnviado: (id: number) => ipcRenderer.invoke('sefaz:nfes:marcarEmailEnviado', id),
+      exportarNF: (payload: Record<string, unknown>) => ipcRenderer.invoke('sefaz:nfes:exportarNF', payload),
     },
     consultar: (empresaId: number) => ipcRenderer.invoke('sefaz:consultar', empresaId),
     email: {
@@ -173,10 +174,22 @@ const api = {
     consultar:        (empresaId: number) => ipcRenderer.invoke('nfse:consultar', empresaId),
     reimportar:       (empresaId: number) => ipcRenderer.invoke('nfse:reimportar', empresaId),
     verificarEventos: (empresaId: number) => ipcRenderer.invoke('nfse:verificarEventos', empresaId),
+    exportarNF: (payload: Record<string, unknown>) => ipcRenderer.invoke('nfse:exportarNF', payload),
     onProgress: (cb: (msg: string) => void) => {
       ipcRenderer.on('nfse:progress', (_e, msg) => cb(msg))
       return () => ipcRenderer.removeAllListeners('nfse:progress')
     },
+  },
+
+  // Tributos (Lucro Presumido)
+  tributos: {
+    getPremissas:    (empresa_id: number) => ipcRenderer.invoke('tributos:getPremissas', empresa_id),
+    savePremissas:   (empresa_id: number, data: Record<string, unknown>) => ipcRenderer.invoke('tributos:savePremissas', empresa_id, data),
+    getFaturamento:  (empresa_id: number, ano: number, trimestre: number) => ipcRenderer.invoke('tributos:getFaturamento', empresa_id, ano, trimestre),
+    salvarTrimestre: (data: Record<string, unknown>) => ipcRenderer.invoke('tributos:salvarTrimestre', data),
+    getHistorico:           (empresa_id: number) => ipcRenderer.invoke('tributos:getHistorico', empresa_id),
+    getHistoricoTrimestre:  (empresa_id: number, ano: number, trimestre: number) => ipcRenderer.invoke('tributos:getHistoricoTrimestre', empresa_id, ano, trimestre),
+    deleteHistorico: (id: number) => ipcRenderer.invoke('tributos:deleteHistorico', id),
   },
 
   // Email

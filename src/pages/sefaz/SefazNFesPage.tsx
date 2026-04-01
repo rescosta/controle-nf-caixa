@@ -1,5 +1,5 @@
-import { useEffect, useState, useCallback } from 'react'
-import { RefreshCw, Eye, Printer, DollarSign, Mail, FileDown, X, CheckCircle, AlertTriangle } from 'lucide-react'
+import { useEffect, useState, useCallback, useRef } from 'react'
+import { RefreshCw, Eye, Printer, DollarSign, Mail, FileDown, X, CheckCircle, AlertTriangle, ArrowUpRight, ChevronDown } from 'lucide-react'
 import { api } from '../../lib/api'
 
 interface Empresa { id: number; nome: string; cnpj: string; pfx_b64?: string }
@@ -10,9 +10,68 @@ interface Nfe {
   email_enviado: number; tipo_nfe: 'procNFe' | 'resNFe'; created_at: string
 }
 interface Destinatario { id: number; nome: string; email: string }
+interface EmpresaNF { id: number; nome: string; cnpj?: string }
+interface UnidadeNF { id: number; nome: string; empresa_id: number }
+interface CentroCusto { id: number; codigo: string; descricao: string }
 
 const fmtBRL = (v: number) => v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 const fmtData = (d: string) => d ? d.split('-').reverse().join('/') : '-'
+
+function getTagXml(xml: string, tag: string): string {
+  const m = xml.match(new RegExp(`<(?:[^:>]*:)?${tag}[^>]*>([\\s\\S]*?)<\\/(?:[^:>]*:)?${tag}\\s*>`))
+  return m?.[1]?.trim() ?? ''
+}
+
+// Select com busca embutida
+function SearchableSelect({ value, onChange, options, placeholder, disabled }: {
+  value: number | ''
+  onChange: (v: number | '') => void
+  options: { value: number; label: string }[]
+  placeholder: string
+  disabled?: boolean
+}) {
+  const [search, setSearch] = useState('')
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const filtered = options.filter(o => o.label.toLowerCase().includes(search.toLowerCase()))
+  const selected = options.find(o => o.value === value)
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  return (
+    <div ref={ref} className="relative">
+      <div onClick={() => !disabled && setOpen(o => !o)}
+        className={`w-full bg-slate-900 border rounded-lg px-3 py-2 text-sm flex items-center justify-between cursor-pointer transition
+          ${open ? 'border-purple-500' : 'border-slate-600'}
+          ${disabled ? 'opacity-50 pointer-events-none' : 'hover:border-slate-500'}`}>
+        <span className={selected ? 'text-slate-200' : 'text-slate-500'}>{selected?.label || placeholder}</span>
+        <ChevronDown size={14} className={`text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </div>
+      {open && (
+        <div className="absolute z-50 w-full mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl overflow-hidden">
+          <input autoFocus value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="Buscar..."
+            className="w-full px-3 py-2 text-sm bg-slate-900 border-b border-slate-700 text-slate-200 outline-none placeholder-slate-600" />
+          <div className="max-h-48 overflow-y-auto">
+            <div onClick={() => { onChange(''); setOpen(false); setSearch('') }}
+              className="px-3 py-2 text-sm text-slate-500 hover:bg-slate-700 cursor-pointer">{placeholder}</div>
+            {filtered.map(o => (
+              <div key={o.value} onClick={() => { onChange(o.value); setOpen(false); setSearch('') }}
+                className={`px-3 py-2 text-sm cursor-pointer hover:bg-slate-700 ${o.value === value ? 'text-purple-400 font-medium' : 'text-slate-200'}`}>
+                {o.label}
+              </div>
+            ))}
+            {filtered.length === 0 && <div className="px-3 py-2 text-sm text-slate-500">Nenhum resultado</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 function traduzirErro(msg: string): { titulo: string; detalhe: string } {
   const limpo = msg.replace(/Error invoking remote method '[^']+': /g, '').replace(/^Error: /, '')
@@ -41,11 +100,21 @@ export default function SefazNFesPage() {
 
   // Modais
   const [modalErro, setModalErro] = useState<{ titulo: string; detalhe: string } | null>(null)
-  const [modalSucesso, setModalSucesso] = useState<{ total: number; atualizadas: number; manifestados: number; errosManifestacao: number; temMais: boolean } | null>(null)
+  const [modalSucesso, setModalSucesso] = useState<{ total: number; atualizadas: number; manifestados: number; errosManifestacao: number; temMais: boolean; exportado?: boolean } | null>(null)
   const [modalEmail, setModalEmail] = useState<Nfe | null>(null)
   const [modalVisualizar, setModalVisualizar] = useState<Nfe | null>(null)
   const [destinatariosSel, setDestinatariosSel] = useState<number[]>([])
   const [enviandoEmail, setEnviandoEmail] = useState(false)
+
+  // Export
+  const [modalExportar, setModalExportar] = useState<Nfe | null>(null)
+  const [exportando, setExportando] = useState(false)
+  const [exportEmpresaId, setExportEmpresaId] = useState<number | ''>('')
+  const [exportUnidadeId, setExportUnidadeId] = useState<number | ''>('')
+  const [exportCcId, setExportCcId] = useState<number | ''>('')
+  const [empresasNF, setEmpresasNF] = useState<EmpresaNF[]>([])
+  const [unidadesNF, setUnidadesNF] = useState<UnidadeNF[]>([])
+  const [ccNF, setCcNF] = useState<CentroCusto[]>([])
 
   useEffect(() => {
     api.sefaz.empresas.list().then((emps: Empresa[]) => {
@@ -56,9 +125,20 @@ export default function SefazNFesPage() {
       setDestinatarios(d)
       setDestinatariosSel(d.map(x => x.id))
     })
+    api.empresas.list().then((e: EmpresaNF[]) => setEmpresasNF(e))
+    api.centrosCusto.list().then((c: CentroCusto[]) => setCcNF(c))
     const unsub = api.sefaz.onProgress((msg: string) => setProgressMsg(msg))
     return unsub
   }, [])
+
+  useEffect(() => {
+    if (exportEmpresaId) {
+      api.unidades.listByEmpresa(Number(exportEmpresaId)).then((u: UnidadeNF[]) => setUnidadesNF(u))
+      setExportUnidadeId('')
+    } else {
+      setUnidadesNF([])
+    }
+  }, [exportEmpresaId])
 
   const carregar = useCallback(async () => {
     if (!empresaId) return
@@ -93,6 +173,44 @@ export default function SefazNFesPage() {
     const a = document.createElement('a')
     a.href = url; a.download = `NFe_${nfe.nf_numero || nfe.chave_acesso.slice(0, 8)}.xml`
     a.click(); URL.revokeObjectURL(url)
+  }
+
+  const abrirExportar = async (nfe: Nfe) => {
+    setModalExportar(nfe)
+    setExportEmpresaId(''); setExportUnidadeId(''); setExportCcId('')
+    // Tenta extrair CNPJ do destinatário do XML e pré-preencher empresa
+    try {
+      const xml = await api.sefaz.nfes.buscarXml(nfe.id)
+      if (xml) {
+        const destBlock = xml.match(/<dest[^>]*>([\s\S]*?)<\/dest>/)?.[1] ?? ''
+        const cnpjDest = getTagXml(destBlock, 'CNPJ').replace(/\D/g, '')
+        if (cnpjDest) {
+          // Busca nas empresas do sistema principal
+          const match = empresasNF.find(e => (e.cnpj ?? '').replace(/\D/g, '') === cnpjDest)
+          if (match) setExportEmpresaId(match.id)
+        }
+      }
+    } catch { /* sem XML ainda — ignora */ }
+  }
+
+  const exportarNF = async () => {
+    if (!modalExportar || !exportEmpresaId) return
+    setExportando(true)
+    try {
+      await api.sefaz.nfes.exportarNF({
+        nfe: modalExportar as unknown as Record<string, unknown>,
+        empresaId: Number(exportEmpresaId),
+        unidadeId: exportUnidadeId ? Number(exportUnidadeId) : null,
+        centroCustoId: exportCcId ? Number(exportCcId) : null,
+      })
+      setModalExportar(null)
+      setExportEmpresaId(''); setExportUnidadeId(''); setExportCcId('')
+      setModalSucesso({ total: 0, atualizadas: 0, manifestados: 0, errosManifestacao: 0, temMais: false, exportado: true })
+    } catch (e: any) {
+      setModalErro({ titulo: 'Erro ao exportar', detalhe: e.message.replace(/Error invoking remote method '[^']+': /g, '').replace(/^Error: /, '') })
+    } finally {
+      setExportando(false)
+    }
   }
 
   const enviarEmail = async () => {
@@ -216,6 +334,10 @@ export default function SefazNFesPage() {
                       className={`p-1.5 transition rounded ${nfe.email_enviado ? 'text-green-400 hover:text-green-300' : 'text-blue-400 hover:text-blue-300'}`}>
                       <Mail size={14} />
                     </button>
+                    <button onClick={() => abrirExportar(nfe)} title="Exportar para Controle de NF"
+                      className="p-1.5 text-slate-400 hover:text-purple-400 transition rounded">
+                      <ArrowUpRight size={14} />
+                    </button>
                     <button onClick={() => baixarXml(nfe)} title="Baixar XML" className="p-1.5 text-slate-400 hover:text-slate-200 transition rounded"><FileDown size={14} /></button>
                   </div>
                 </td>
@@ -224,6 +346,55 @@ export default function SefazNFesPage() {
           </tbody>
         </table>
       </div>
+
+      {/* Modal Exportar para Controle de NF */}
+      {modalExportar && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setModalExportar(null)}>
+          <div className="bg-slate-800 border border-slate-700 rounded-xl w-[500px] max-w-[95vw] p-6 shadow-xl" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-base font-semibold text-slate-200 flex items-center gap-2">
+                <ArrowUpRight size={16} className="text-purple-400" /> Exportar para Controle de NF
+              </h2>
+              <button onClick={() => setModalExportar(null)} className="text-slate-500 hover:text-slate-300"><X size={18} /></button>
+            </div>
+            <div className="bg-slate-900/60 rounded-lg p-3 text-sm mb-5 space-y-1.5">
+              <div className="flex gap-3"><span className="w-28 text-slate-500 shrink-0">Fornecedor</span><span className="text-slate-200 font-medium">{modalExportar.fornecedor_nome || '-'}</span></div>
+              <div className="flex gap-3"><span className="w-28 text-slate-500 shrink-0">CNPJ</span><span className="font-mono text-slate-300 text-xs">{modalExportar.fornecedor_cnpj || '-'}</span></div>
+              <div className="flex gap-3"><span className="w-28 text-slate-500 shrink-0">Nº NF-e</span><span className="font-mono text-slate-300">{modalExportar.nf_numero || '-'}</span></div>
+              <div className="flex gap-3"><span className="w-28 text-slate-500 shrink-0">Data</span><span className="text-slate-300">{fmtData(modalExportar.nf_data)}</span></div>
+              <div className="flex gap-3"><span className="w-28 text-slate-500 shrink-0">Valor</span><span className="font-bold text-green-400">{fmtBRL(modalExportar.valor_nota)}</span></div>
+            </div>
+            <div className="space-y-3 mb-5">
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Empresa <span className="text-red-400">*</span></label>
+                <SearchableSelect value={exportEmpresaId} onChange={setExportEmpresaId}
+                  options={empresasNF.map(e => ({ value: e.id, label: e.nome }))}
+                  placeholder="Selecione a empresa..." />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Unidade</label>
+                <SearchableSelect value={exportUnidadeId} onChange={setExportUnidadeId}
+                  options={unidadesNF.map(u => ({ value: u.id, label: u.nome }))}
+                  placeholder="Selecione a unidade..." disabled={!exportEmpresaId} />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Centro de Custo</label>
+                <SearchableSelect value={exportCcId} onChange={setExportCcId}
+                  options={ccNF.map(c => ({ value: c.id, label: `${c.codigo} — ${c.descricao}` }))}
+                  placeholder="Selecione o centro de custo..." />
+              </div>
+            </div>
+            <div className="text-xs text-slate-500 mb-4">O fornecedor será criado automaticamente se não existir. Status será <span className="text-slate-400">Pendente</span>.</div>
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setModalExportar(null)} className="px-4 py-2 text-sm text-slate-400 hover:text-slate-200">Cancelar</button>
+              <button onClick={exportarNF} disabled={exportando || !exportEmpresaId}
+                className="flex items-center gap-2 px-5 py-2 bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition">
+                <ArrowUpRight size={14} /> {exportando ? 'Exportando...' : 'Exportar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Modal Visualizar */}
       {modalVisualizar && (
@@ -246,8 +417,8 @@ export default function SefazNFesPage() {
                   ['Tipo', modalVisualizar.tipo_nfe === 'procNFe' ? <span className="text-green-400 text-xs">✓ XML Completo</span> : <span className="text-yellow-400 text-xs">⏳ Resumo — aguardando XML</span>],
                 ].map(([label, value], i) => (
                   <div key={i} className="flex gap-3">
-                    <span className="w-32 text-slate-500 shrink-0">{label}</span>
-                    <span>{value}</span>
+                    <span className="w-32 text-slate-500 shrink-0">{label as string}</span>
+                    <span>{value as React.ReactNode}</span>
                   </div>
                 ))}
                 <div className="pt-2 border-t border-slate-700">
@@ -323,15 +494,21 @@ export default function SefazNFesPage() {
             <div className="flex gap-4 items-start mb-5">
               <CheckCircle size={28} className="text-green-400 shrink-0 mt-0.5" />
               <div>
-                <div className="font-semibold text-green-400 mb-3">Consulta SEFAZ concluída!</div>
+                <div className="font-semibold text-green-400 mb-3">{modalSucesso.exportado ? 'NF-e exportada!' : 'Consulta SEFAZ concluída!'}</div>
                 <div className="text-sm text-slate-300 space-y-1.5">
-                  <div>📥 <strong>{modalSucesso.total}</strong> NF-e(s) nova(s) importada(s)</div>
-                  {modalSucesso.atualizadas > 0 && <div>🔄 <strong>{modalSucesso.atualizadas}</strong> resumo(s) com XML completo</div>}
-                  {modalSucesso.manifestados > 0 && <div>📋 <strong>{modalSucesso.manifestados}</strong> ciência(s) manifestada(s)</div>}
-                  {modalSucesso.errosManifestacao > 0 && <div className="text-red-400">⚠️ <strong>{modalSucesso.errosManifestacao}</strong> erro(s) na manifestação</div>}
-                  {modalSucesso.total === 0 && !modalSucesso.temMais && <div className="text-slate-500">Nenhuma NF-e nova encontrada.</div>}
+                  {modalSucesso.exportado ? (
+                    <div>✅ Nota exportada para <strong>Controle de NF</strong> com status <span className="text-slate-400">Pendente</span>. Acesse a aba para completar os dados.</div>
+                  ) : (
+                    <>
+                      <div>📥 <strong>{modalSucesso.total}</strong> NF-e(s) nova(s) importada(s)</div>
+                      {modalSucesso.atualizadas > 0 && <div>🔄 <strong>{modalSucesso.atualizadas}</strong> resumo(s) com XML completo</div>}
+                      {modalSucesso.manifestados > 0 && <div>📋 <strong>{modalSucesso.manifestados}</strong> ciência(s) manifestada(s)</div>}
+                      {modalSucesso.errosManifestacao > 0 && <div className="text-red-400">⚠️ <strong>{modalSucesso.errosManifestacao}</strong> erro(s) na manifestação</div>}
+                      {modalSucesso.total === 0 && !modalSucesso.temMais && <div className="text-slate-500">Nenhuma NF-e nova encontrada.</div>}
+                    </>
+                  )}
                 </div>
-                {modalSucesso.temMais && (
+                {!modalSucesso.exportado && modalSucesso.temMais && (
                   <div className="mt-3 p-3 bg-yellow-900/30 border border-yellow-700/50 rounded-lg text-xs text-yellow-300">
                     ⏳ Ainda há documentos pendentes no SEFAZ. Consulte novamente para baixar mais.
                   </div>

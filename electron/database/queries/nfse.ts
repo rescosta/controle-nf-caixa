@@ -16,6 +16,7 @@ export interface NfseServico {
   data_pagamento?: string
   xml_blob?: string
   fonte: string
+  tipo: 'emitida' | 'recebida'
   cancelada: number          // 0 = ativa, 1 = cancelada
   email_enviado: number      // 0 = não, 1 = enviado
   created_at: string
@@ -53,6 +54,10 @@ export const nfseServicosQueries = {
       sql += ' AND fonte = @fonte'
       params.fonte = filtros.fonte
     }
+    if ((filtros as Record<string, unknown>).tipo && (filtros as Record<string, unknown>).tipo !== 'todas') {
+      sql += ' AND tipo = @tipo'
+      params.tipo = (filtros as Record<string, unknown>).tipo
+    }
 
     sql += ' ORDER BY competencia DESC, id DESC'
     return getDb().prepare(sql).all(params) as NfseServico[]
@@ -70,9 +75,9 @@ export const nfseServicosQueries = {
   inserir(servico: Omit<NfseServico, 'id' | 'status_pagamento' | 'created_at'>): boolean {
     const info = getDb().prepare(`
       INSERT OR IGNORE INTO nfse_servicos
-        (empresa_id, chave_acesso, nsu, numero, serie, competencia, prestador_cnpj, prestador_nome, valor_servicos, descricao, xml_blob, fonte)
+        (empresa_id, chave_acesso, nsu, numero, serie, competencia, prestador_cnpj, prestador_nome, valor_servicos, descricao, xml_blob, fonte, tipo)
       VALUES
-        (@empresa_id, @chave_acesso, @nsu, @numero, @serie, @competencia, @prestador_cnpj, @prestador_nome, @valor_servicos, @descricao, @xml_blob, @fonte)
+        (@empresa_id, @chave_acesso, @nsu, @numero, @serie, @competencia, @prestador_cnpj, @prestador_nome, @valor_servicos, @descricao, @xml_blob, @fonte, @tipo)
     `).run(servico)
     return info.changes > 0
   },

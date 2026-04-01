@@ -1,6 +1,56 @@
-import { useEffect, useState, useCallback } from 'react'
-import { RefreshCw, Eye, DollarSign, FileDown, X, CheckCircle, AlertTriangle, RotateCcw, ShieldCheck, Printer, Mail } from 'lucide-react'
+import { useEffect, useState, useCallback, useRef } from 'react'
+import { RefreshCw, Eye, DollarSign, FileDown, X, CheckCircle, AlertTriangle, RotateCcw, ShieldCheck, Printer, Mail, ArrowUpRight, ChevronDown } from 'lucide-react'
 import { api } from '../../lib/api'
+
+function SearchableSelect({ value, onChange, options, placeholder, disabled }: {
+  value: number | ''
+  onChange: (v: number | '') => void
+  options: { value: number; label: string }[]
+  placeholder: string
+  disabled?: boolean
+}) {
+  const [search, setSearch] = useState('')
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const filtered = options.filter(o => o.label.toLowerCase().includes(search.toLowerCase()))
+  const selected = options.find(o => o.value === value)
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false) }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [])
+
+  return (
+    <div ref={ref} className="relative">
+      <div onClick={() => !disabled && setOpen(o => !o)}
+        className={`w-full bg-slate-900 border rounded-lg px-3 py-2 text-sm flex items-center justify-between cursor-pointer transition
+          ${open ? 'border-purple-500' : 'border-slate-600'}
+          ${disabled ? 'opacity-50 pointer-events-none' : 'hover:border-slate-500'}`}>
+        <span className={selected ? 'text-slate-200' : 'text-slate-500'}>{selected?.label || placeholder}</span>
+        <ChevronDown size={14} className={`text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </div>
+      {open && (
+        <div className="absolute z-50 w-full mt-1 bg-slate-800 border border-slate-600 rounded-lg shadow-xl overflow-hidden">
+          <input autoFocus value={search} onChange={e => setSearch(e.target.value)}
+            placeholder="Buscar..."
+            className="w-full px-3 py-2 text-sm bg-slate-900 border-b border-slate-700 text-slate-200 outline-none placeholder-slate-600" />
+          <div className="max-h-48 overflow-y-auto">
+            <div onClick={() => { onChange(''); setOpen(false); setSearch('') }}
+              className="px-3 py-2 text-sm text-slate-500 hover:bg-slate-700 cursor-pointer">{placeholder}</div>
+            {filtered.map(o => (
+              <div key={o.value} onClick={() => { onChange(o.value); setOpen(false); setSearch('') }}
+                className={`px-3 py-2 text-sm cursor-pointer hover:bg-slate-700 ${o.value === value ? 'text-purple-400 font-medium' : 'text-slate-200'}`}>
+                {o.label}
+              </div>
+            ))}
+            {filtered.length === 0 && <div className="px-3 py-2 text-sm text-slate-500">Nenhum resultado</div>}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
 interface Empresa { id: number; nome: string; cnpj: string; pfx_b64?: string }
 interface NfseServico {
@@ -9,11 +59,15 @@ interface NfseServico {
   prestador_cnpj: string; prestador_nome: string
   valor_servicos: number; descricao: string
   status_pagamento: 'pendente' | 'pago'; data_pagamento?: string
+  tipo: 'emitida' | 'recebida'
   cancelada: number
   email_enviado: number
   created_at: string
 }
 interface Destinatario { id: number; nome: string; email: string }
+interface EmpresaNF { id: number; nome: string }
+interface UnidadeNF { id: number; nome: string; empresa_id: number }
+interface CentroCusto { id: number; codigo: string; descricao: string }
 
 const fmtBRL = (v: number) => v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
 const fmtCompetencia = (c: string) => {
@@ -39,11 +93,11 @@ export default function NfseServicosPage() {
   const [consultando, setConsultando] = useState(false)
   const [progressMsg, setProgressMsg] = useState('')
   const [ultimaConsulta, setUltimaConsulta] = useState('')
-  const [filtros, setFiltros] = useState({ prestador: '', ano: '', competencia: '', status_pagamento: 'todas', fonte: 'todas' })
+  const [filtros, setFiltros] = useState({ prestador: '', ano: '', competencia: '', status_pagamento: 'todas', fonte: 'todas', tipo: 'todas' })
   const [anosDisponiveis, setAnosDisponiveis] = useState<string[]>([])
 
   const [modalErro, setModalErro] = useState<{ titulo: string; detalhe: string } | null>(null)
-  const [modalSucesso, setModalSucesso] = useState<{ total: number; temMais: boolean; debugRaw?: string; reimport?: boolean; ultimoNsu?: string; paginas?: number } | null>(null)
+  const [modalSucesso, setModalSucesso] = useState<{ total: number; temMais: boolean; debugRaw?: string; reimport?: boolean; exportado?: boolean; ultimoNsu?: string; paginas?: number } | null>(null)
   const [modalVisualizar, setModalVisualizar] = useState<NfseServico | null>(null)
   const [confirmReimportar, setConfirmReimportar] = useState(false)
   const [verificandoEventos, setVerificandoEventos] = useState(false)
@@ -52,6 +106,15 @@ export default function NfseServicosPage() {
   const [destinatariosSel, setDestinatariosSel] = useState<number[]>([])
   const [modalEmail, setModalEmail] = useState<NfseServico | null>(null)
   const [enviandoEmail, setEnviandoEmail] = useState(false)
+
+  const [modalExportar, setModalExportar] = useState<NfseServico | null>(null)
+  const [exportando, setExportando] = useState(false)
+  const [exportEmpresaId, setExportEmpresaId] = useState<number | ''>('')
+  const [exportUnidadeId, setExportUnidadeId] = useState<number | ''>('')
+  const [exportCcId, setExportCcId] = useState<number | ''>('')
+  const [empresasNF, setEmpresasNF] = useState<EmpresaNF[]>([])
+  const [unidadesNF, setUnidadesNF] = useState<UnidadeNF[]>([])
+  const [ccNF, setCcNF] = useState<CentroCusto[]>([])
 
   useEffect(() => {
     api.sefaz.empresas.list().then((emps: Empresa[]) => {
@@ -62,6 +125,8 @@ export default function NfseServicosPage() {
       setDestinatarios(d)
       setDestinatariosSel(d.map(x => x.id))
     })
+    api.empresas.list().then((e: EmpresaNF[]) => setEmpresasNF(e))
+    api.centrosCusto.list().then((c: CentroCusto[]) => setCcNF(c))
     const unsub = (api as any).nfse.onProgress((msg: string) => setProgressMsg(msg))
     return unsub
   }, [])
@@ -75,6 +140,15 @@ export default function NfseServicosPage() {
   }, [empresaId, filtros])
 
   useEffect(() => { carregar() }, [carregar])
+
+  useEffect(() => {
+    if (exportEmpresaId) {
+      api.unidades.listByEmpresa(Number(exportEmpresaId)).then((u: UnidadeNF[]) => setUnidadesNF(u))
+      setExportUnidadeId('')
+    } else {
+      setUnidadesNF([])
+    }
+  }, [exportEmpresaId])
 
   const consultar = async () => {
     if (!empresaId) return
@@ -156,6 +230,26 @@ export default function NfseServicosPage() {
     }
   }
 
+  const exportarNF = async () => {
+    if (!modalExportar || !exportEmpresaId) return
+    setExportando(true)
+    try {
+      await (api as any).nfse.exportarNF({
+        nfse: modalExportar,
+        empresaId: Number(exportEmpresaId),
+        unidadeId: exportUnidadeId ? Number(exportUnidadeId) : null,
+        centroCustoId: exportCcId ? Number(exportCcId) : null,
+      })
+      setModalExportar(null)
+      setExportEmpresaId(''); setExportUnidadeId(''); setExportCcId('')
+      setModalSucesso({ total: -1, temMais: false, exportado: true } as any)
+    } catch (e: any) {
+      setModalErro({ titulo: 'Erro ao exportar', detalhe: e.message.replace(/Error invoking remote method '[^']+': /g, '').replace(/^Error: /, '') })
+    } finally {
+      setExportando(false)
+    }
+  }
+
   const baixarXml = async (s: NfseServico) => {
     const xml = await (api as any).nfse.servicos.buscarXml(s.id)
     if (!xml) return
@@ -208,7 +302,8 @@ export default function NfseServicosPage() {
           <strong className="text-slate-400">BHISS (BH antigo):</strong> o webservice municipal retorna NFS-e emitidas pelo prestador, não recebidas como tomador.
           NFS-e tomadas de BH pré-2020 devem ser importadas manualmente via{' '}
           <span className="text-slate-400">fazenda.pbh.gov.br/nfse</span>.
-          Dados BHISS já importados permanecem na lista.
+          Dados BHISS já importados permanecem na lista.{' '}
+          <strong className="text-amber-500">Ao filtrar por "Emitidas", use também "Fonte: ADN Nacional" para evitar duplicatas com o BHISS.</strong>
         </span>
       </div>
 
@@ -233,7 +328,13 @@ export default function NfseServicosPage() {
           <option value="adn">ADN Nacional</option>
           <option value="bhiss">BHISS (BH antigo)</option>
         </select>
-        <button onClick={() => setFiltros({ prestador: '', ano: '', competencia: '', status_pagamento: 'todas', fonte: 'todas' })}
+        <select className="bg-slate-900 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500"
+          value={filtros.tipo} onChange={e => setFiltros(f => ({ ...f, tipo: e.target.value }))}>
+          <option value="todas">Tipo: Todas</option>
+          <option value="recebida">Recebidas</option>
+          <option value="emitida">Emitidas</option>
+        </select>
+        <button onClick={() => setFiltros({ prestador: '', ano: '', competencia: '', status_pagamento: 'todas', fonte: 'todas', tipo: 'todas' })}
           className="px-3 py-1.5 text-sm text-slate-400 hover:text-slate-200 border border-slate-600 rounded-lg transition">Limpar</button>
       </div>
 
@@ -244,6 +345,7 @@ export default function NfseServicosPage() {
             <tr>
               <th className="text-left px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide min-w-[280px]" style={{ resize: 'horizontal', overflow: 'hidden' }}>Prestador</th>
               <th className="text-left px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">CNPJ</th>
+              <th className="text-left px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Tipo</th>
               <th className="text-left px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Nº NFS-e</th>
               <th className="text-left px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Competência</th>
               <th className="text-right px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wide">Valor</th>
@@ -253,7 +355,7 @@ export default function NfseServicosPage() {
           </thead>
           <tbody>
             {servicos.length === 0 && (
-              <tr><td colSpan={7} className="text-center py-16 text-slate-500">{empresaId ? 'Nenhuma NFS-e encontrada' : 'Selecione uma empresa'}</td></tr>
+              <tr><td colSpan={8} className="text-center py-16 text-slate-500">{empresaId ? 'Nenhuma NFS-e encontrada' : 'Selecione uma empresa'}</td></tr>
             )}
             {servicos.map(s => (
               <tr key={s.id} className={`border-b border-slate-700/40 hover:bg-slate-800/50 transition ${s.cancelada ? 'opacity-60' : ''}`}>
@@ -264,6 +366,12 @@ export default function NfseServicosPage() {
                   </div>
                 </td>
                 <td className="px-4 py-3 font-mono text-slate-400 text-xs">{s.prestador_cnpj || '-'}</td>
+                <td className="px-4 py-3">
+                  {s.tipo === 'emitida'
+                    ? <span className="px-2 py-0.5 rounded text-xs font-medium bg-violet-500/20 text-violet-300">Emitida</span>
+                    : <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-500/20 text-blue-300">Recebida</span>
+                  }
+                </td>
                 <td className="px-4 py-3 font-mono text-slate-300">{s.numero || '-'}{s.serie ? `/${s.serie}` : ''}</td>
                 <td className="px-4 py-3 text-slate-300">{fmtCompetencia(s.competencia)}</td>
                 <td className={`px-4 py-3 text-right font-semibold ${s.cancelada ? 'line-through text-slate-500' : 'text-green-400'}`}>{fmtBRL(s.valor_servicos)}</td>
@@ -284,6 +392,21 @@ export default function NfseServicosPage() {
                       className={`p-1.5 transition rounded ${s.email_enviado ? 'text-green-400 hover:text-green-300' : 'text-blue-400 hover:text-blue-300'}`}>
                       <Mail size={14} />
                     </button>
+                    {s.tipo !== 'emitida' && (
+                      <button onClick={() => {
+                        setModalExportar(s)
+                        // Tenta pré-preencher empresa pelo CNPJ da empresa SEFAZ selecionada
+                        const sefazEmp = empresas.find(e => e.id === empresaId)
+                        const cnpjSefaz = (sefazEmp?.cnpj ?? '').replace(/\D/g, '')
+                        const match = cnpjSefaz ? empresasNF.find(e => ((e as any).cnpj ?? '').replace(/\D/g, '') === cnpjSefaz) : null
+                        setExportEmpresaId(match ? match.id : '')
+                        setExportUnidadeId(''); setExportCcId('')
+                      }}
+                        title="Exportar para Controle de NF"
+                        className="p-1.5 text-slate-400 hover:text-purple-400 transition rounded">
+                        <ArrowUpRight size={14} />
+                      </button>
+                    )}
                     <button onClick={() => baixarXml(s)} title="Baixar XML" className="p-1.5 text-slate-400 hover:text-slate-200 transition rounded"><FileDown size={14} /></button>
                   </div>
                 </td>
@@ -380,15 +503,23 @@ export default function NfseServicosPage() {
             <div className="flex gap-4 items-start mb-5">
               <CheckCircle size={28} className="text-green-400 shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0">
-                <div className="font-semibold text-green-400 mb-3">{modalSucesso.reimport ? 'Reimportação concluída!' : 'Consulta NFS-e concluída!'}</div>
-                <div className="text-sm text-slate-300 space-y-1.5">
-                  <div>📥 <strong>{modalSucesso.total}</strong> NFS-e(s) nova(s) importada(s)</div>
-                  {modalSucesso.total === 0 && <div className="text-slate-500">Nenhuma NFS-e nova encontrada.</div>}
-                  <div className="text-xs text-slate-500">
-                    Páginas consultadas: {modalSucesso.paginas ?? '-'} | NSU final: {modalSucesso.ultimoNsu ?? '-'}
-                  </div>
+                <div className="font-semibold text-green-400 mb-3">
+                  {modalSucesso.exportado ? 'NFS-e exportada!' : modalSucesso.reimport ? 'Reimportação concluída!' : 'Consulta NFS-e concluída!'}
                 </div>
-                {modalSucesso.temMais && (
+                <div className="text-sm text-slate-300 space-y-1.5">
+                  {modalSucesso.exportado ? (
+                    <div>✅ Nota exportada para <strong>Controle de NF</strong> com status <span className="text-slate-400">Pendente</span>. Acesse a aba para completar os dados.</div>
+                  ) : (
+                    <>
+                      <div>📥 <strong>{modalSucesso.total}</strong> NFS-e(s) nova(s) importada(s)</div>
+                      {modalSucesso.total === 0 && <div className="text-slate-500">Nenhuma NFS-e nova encontrada.</div>}
+                      <div className="text-xs text-slate-500">
+                        Páginas consultadas: {modalSucesso.paginas ?? '-'} | NSU final: {modalSucesso.ultimoNsu ?? '-'}
+                      </div>
+                    </>
+                  )}
+                </div>
+                {!modalSucesso.exportado && modalSucesso.temMais && (
                   <div className="mt-3 p-3 bg-yellow-900/30 border border-yellow-700/50 rounded-lg text-xs text-yellow-300">
                     ⏳ Ainda há documentos pendentes. Consulte novamente para baixar mais.
                   </div>
@@ -424,6 +555,61 @@ export default function NfseServicosPage() {
             </div>
             <div className="flex justify-end">
               <button onClick={() => setModalEventos(null)} className="px-5 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded-lg text-sm font-medium transition">OK</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Exportar para Controle de NF */}
+      {modalExportar && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setModalExportar(null)}>
+          <div className="bg-slate-800 border border-slate-700 rounded-xl w-[500px] max-w-[95vw] p-6 shadow-xl" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="text-base font-semibold text-slate-200 flex items-center gap-2">
+                <ArrowUpRight size={16} className="text-purple-400" /> Exportar para Controle de NF
+              </h2>
+              <button onClick={() => setModalExportar(null)} className="text-slate-500 hover:text-slate-300"><X size={18} /></button>
+            </div>
+
+            {/* Resumo da NFS-e */}
+            <div className="bg-slate-900/60 rounded-lg p-3 text-sm mb-5 space-y-1.5">
+              <div className="flex gap-3"><span className="w-28 text-slate-500 shrink-0">Prestador</span><span className="text-slate-200 font-medium">{modalExportar.prestador_nome || '-'}</span></div>
+              <div className="flex gap-3"><span className="w-28 text-slate-500 shrink-0">CNPJ</span><span className="font-mono text-slate-300 text-xs">{modalExportar.prestador_cnpj || '-'}</span></div>
+              <div className="flex gap-3"><span className="w-28 text-slate-500 shrink-0">Nº NFS-e</span><span className="font-mono text-slate-300">{modalExportar.numero || '-'}</span></div>
+              <div className="flex gap-3"><span className="w-28 text-slate-500 shrink-0">Competência</span><span className="text-slate-300">{fmtCompetencia(modalExportar.competencia)}</span></div>
+              <div className="flex gap-3"><span className="w-28 text-slate-500 shrink-0">Valor</span><span className="font-bold text-green-400">{fmtBRL(modalExportar.valor_servicos)}</span></div>
+            </div>
+
+            {/* Seleção de empresa/unidade/centro de custo */}
+            <div className="space-y-3 mb-5">
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Empresa <span className="text-red-400">*</span></label>
+                <SearchableSelect value={exportEmpresaId} onChange={setExportEmpresaId}
+                  options={empresasNF.map(e => ({ value: e.id, label: e.nome }))}
+                  placeholder="Selecione a empresa..." />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Unidade</label>
+                <SearchableSelect value={exportUnidadeId} onChange={setExportUnidadeId}
+                  options={unidadesNF.map(u => ({ value: u.id, label: u.nome }))}
+                  placeholder="Selecione a unidade..." disabled={!exportEmpresaId} />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Centro de Custo</label>
+                <SearchableSelect value={exportCcId} onChange={setExportCcId}
+                  options={ccNF.map(c => ({ value: c.id, label: `${c.codigo} — ${c.descricao}` }))}
+                  placeholder="Selecione o centro de custo..." />
+              </div>
+            </div>
+
+            <div className="text-xs text-slate-500 mb-4">O fornecedor será criado automaticamente se não existir. Status será <span className="text-slate-400">Pendente</span>.</div>
+
+            <div className="flex justify-end gap-3">
+              <button onClick={() => setModalExportar(null)} className="px-4 py-2 text-sm text-slate-400 hover:text-slate-200">Cancelar</button>
+              <button onClick={exportarNF} disabled={exportando || !exportEmpresaId}
+                className="flex items-center gap-2 px-5 py-2 bg-purple-700 hover:bg-purple-600 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition">
+                <ArrowUpRight size={14} /> {exportando ? 'Exportando...' : 'Exportar'}
+              </button>
             </div>
           </div>
         </div>
