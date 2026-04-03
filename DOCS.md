@@ -398,6 +398,624 @@ transporter = nodemailer.createTransport({
 
 ---
 
+## Módulo Monitor NF — Documentação Detalhada
+
+O módulo **Monitor NF** é acessado pela aba "Monitor NF-e" na navegação principal (`App.tsx`). Internamente usa sub-abas gerenciadas por `SefazPage.tsx`:
+
+| Sub-aba | Componente | Descrição |
+|---------|-----------|-----------|
+| NF-es Recebidas | `SefazNFesPage.tsx` | Documentos fiscais eletrônicos (NF-e) obtidos via webservice SEFAZ |
+| NFS-e Tomadas | `NfseServicosPage.tsx` | Notas de Serviço eletrônicas (NFS-e) via API ADN Nacional |
+| Impostos | `TributosPage.tsx` | Calculadora trimestral de tributos — Lucro Presumido |
+| Empresas SEFAZ | `SefazEmpresasPage.tsx` | Cadastro de certificados digitais A1 por empresa |
+| Destinatários | `SefazDestinatariosPage.tsx` | Lista de e-mails para envio de documentos fiscais |
+
+---
+
+### 1. NF-es Recebidas (SEFAZ)
+
+**Componente:** `src/pages/sefaz/SefazNFesPage.tsx`  
+**Queries:** `electron/database/queries/sefaz.ts` — `sefazNfesQueries`  
+**Integração:** `electron/sefaz/consulta.ts` + `electron/sefaz/manifestacao.ts`
+
+#### Como funciona
+
+1. O usuário seleciona uma empresa cadastrada em Empresas SEFAZ.
+2. Clica em **Consultar SEFAZ** → dispara `api.sefaz.consultar(empresaId)`.
+3. O processo principal autentica com o certificado A1 (`.pfx`) da empresa e chama o webservice de **Distribuição de Documentos Fiscais** da SEFAZ.
+4. As NF-es são baixadas em lotes a partir do último NSU registrado. A cada consulta, o `ultimo_nsu` da empresa é atualizado no banco.
+5. Novos documentos são inseridos via `INSERT OR IGNORE` (evita duplicatas pela `chave_acesso`).
+6. A manifestação de ciência da operação é feita automaticamente para cada NF-e recebida.
+
+#### Rate limiting e cooldown
+
+A SEFAZ limita a **19 consultas por dia** por empresa. O sistema:
+- Registra cada consulta em `sefaz_consultas_count` / `sefaz_consultas_data`.
+- Ao atingir o limite, ativa um cooldown de 65 minutos (`sefaz_cooldown_ate`).
+- Erros específicos são traduzidos para mensagens amigáveis: senha errada, limite atingido, cooldown, sem conexão.
+
+#### Tipos de documento
+
+| `tipo_nfe` | Descrição |
+|-----------|-----------|
+| `procNFe` | XML completo da NF-e (nota autorizada) |
+| `resNFe` | Resumo — XML completo ainda não disponível. Atualizado para `procNFe` quando a nota chega completa numa consulta subsequente |
+
+#### Filtros disponíveis
+
+- Fornecedor (nome ou CNPJ — busca livre)
+- Período (data de emissão: de / até)
+- Status de pagamento (todas / pendente / pago)
+- E-mail (todas / enviadas / não enviadas)
+
+#### Ações por NF-e
+
+| Ação | Descrição |
+|------|-----------|
+| Visualizar | Exibe XML formatado com campos extraídos via regex (`getTagXml`) |
+| Imprimir | Abre janela de impressão com dados da nota |
+| Marcar pago/pendente | Toggle `status_pagamento` com data de pagamento |
+| Enviar por e-mail | Modal com seleção de destinatários cadastrados; envia XML como anexo |
+| Exportar para Controle de NF | Abre modal buscável (empresa / unidade / centro de custo); lê CNPJ do destinatário no XML para pré-preencher a empresa; cria fornecedor automaticamente se não existir; NF importada fica com status `'pendente'` |
+| Download XML | Salva o arquivo `.xml` local via diálogo |
+
+#### Tabela `sefaz_nfes`
+
+| Coluna | Tipo | Descrição |
+|--------|------|-----------|
+| `chave_acesso` | TEXT UNIQUE | Chave de 44 dígitos — controle de duplicatas |
+| `nsu` | TEXT | NSU do documento na SEFAZ |
+| `nf_numero` | TEXT | Número da NF-e |
+| `nf_data` | TEXT | Data de emissão |
+| `fornecedor_cnpj` | TEXT | CNPJ do emitente |
+| `fornecedor_nome` | TEXT | Nome do emitente |
+| `valor_nota` | REAL | Valor total |
+| `status_pagamento` | TEXT | `'pendente'` ou `'pago'` |
+| `data_pagamento` | TEXT | Preenchido ao marcar como pago |
+| `email_enviado` | INTEGER | 0/1 |
+| `xml_blob` | TEXT | XML completo armazenado como texto |
+| `tipo_nfe` | TEXT | `'procNFe'` ou `'resNFe'` |
+
+---
+
+### 2. NFS-e Tomadas — ADN Nacional
+
+**Componente:** `src/pages/sefaz/NfseServicosPage.tsx`  
+**Queries:** `electron/database/queries/nfse.ts` — `nfseServicosQueries`  
+**Integração:** `electron/nfse/consulta.ts`
+
+#### Como funciona
+
+1. O usuário seleciona a empresa e clica em **Consultar ADN**.
+2. O processo principal usa o certificado A1 da empresa para autenticar na **API ADN Nacional** (portal nacional de NFS-e).
+3. A API retorna **todas** as NFS-e vinculadas ao CNPJ — tanto emitidas (empresa como prestador) quanto recebidas (empresa como tomador).
+4. Cada nota é classificada automaticamente como `emitida` ou `recebida` ao ser inserida.
+5. Importação paginada: busca todos os NSUs disponíveis até não haver mais documentos.
+
+#### Lógica de classificação Emitida/Recebida
+
+```
+tipo = 'emitida' SE prestador_cnpj.replace(/\D/g, '') === empresa.cnpj.replace(/\D/g, '')
+tipo = 'recebida' EM TODOS OS OUTROS CASOS
+```
+
+O cálculo é feito no handler `nfse:consultar` em `electron/main.ts` antes de cada `inserir()`. A coluna `tipo` é persistida no banco e reclassificada a cada reimportação.
+
+**Backfill de registros antigos:** a migration em `electron/database/migrations.ts` executa um `UPDATE` fora do `try/catch` a cada startup para reclassificar registros existentes que ainda não tinham `tipo` correto.
+
+#### Coluna Fonte
+
+| `fonte` | Origem |
+|---------|--------|
+| `'adn'` | API ADN Nacional — fonte principal e única usada para cálculos de faturamento |
+| `'bhiss'` | BHISS (sistema legado BH) — fonte obsoleta; não é usada em cálculos para evitar duplicatas |
+
+> **Importante:** A mesma NFS-e pode aparecer nas duas fontes com números diferentes (ex.: BHISS: `2500000000019/00001`, ADN: `1/900`). Por isso o cálculo de faturamento da calculadora de impostos usa **exclusivamente** `fonte = 'adn'`.
+
+#### Badges de Tipo
+
+| Tipo | Badge | Cor |
+|------|-------|-----|
+| Emitida | `Emitida` | Violeta — `bg-violet-500/20 text-violet-300` |
+| Recebida | `Recebida` | Azul — `bg-blue-500/20 text-blue-300` |
+
+#### Filtros disponíveis
+
+- Prestador (nome ou CNPJ)
+- Ano / Competência (mês/ano)
+- Status de pagamento
+- Fonte (ADN / BHISS / todas)
+- Tipo (todas / emitidas / recebidas)
+
+#### Ações por NFS-e
+
+| Ação | Disponível para | Descrição |
+|------|----------------|-----------|
+| Visualizar | Todas | Dados da NFS-e extraídos do XML armazenado |
+| Imprimir | Todas | Impressão dos dados |
+| Marcar pago/pendente | Todas | Toggle de status com data |
+| Enviar por e-mail | Todas | Envia XML por e-mail com destinatários selecionáveis |
+| Exportar para Controle de NF | **Apenas recebidas** | Pré-preenche fornecedor pelo CNPJ do prestador; NF importada fica com status `'pendente'` |
+| Verificar eventos | Empresa | Verifica cancelamentos via API ADN |
+| Reimportar | Empresa | Apaga todos os registros e reprocessa do zero; recalcula tipos |
+
+#### Tabela `nfse_servicos`
+
+| Coluna | Tipo | Descrição |
+|--------|------|-----------|
+| `chave_acesso` | TEXT UNIQUE | Evita duplicatas por nota |
+| `nsu` | TEXT | NSU na API ADN |
+| `numero` / `serie` | TEXT | Número e série da NFS-e |
+| `competencia` | TEXT | Formato `YYYY-MM` |
+| `prestador_cnpj` | TEXT | CNPJ do prestador de serviço |
+| `prestador_nome` | TEXT | Nome do prestador |
+| `valor_servicos` | REAL | Valor da nota |
+| `descricao` | TEXT | Descrição do serviço |
+| `tipo` | TEXT | `'emitida'` ou `'recebida'` |
+| `fonte` | TEXT | `'adn'` ou `'bhiss'` |
+| `cancelada` | INTEGER | 0 = ativa, 1 = cancelada |
+| `email_enviado` | INTEGER | 0 / 1 |
+| `xml_blob` | TEXT | XML completo armazenado como texto |
+
+---
+
+### 3. Impostos — Calculadora Trimestral (Lucro Presumido)
+
+**Componente:** `src/pages/sefaz/TributosPage.tsx`  
+**Queries:** `electron/database/queries/tributos.ts` — `tributosQueries`
+
+#### Objetivo
+
+Calcular automaticamente os tributos federais trimestrais (IRPJ, CSLL, PIS, COFINS) para empresas de serviço no regime de **Lucro Presumido**, com base nas NFS-e **emitidas** do período.
+
+#### Fluxo de uso
+
+1. Selecionar empresa + ano + trimestre.
+2. O sistema busca o faturamento de cada mês do trimestre nas NFS-e emitidas (`fonte='adn'`, `tipo='emitida'`).
+3. Se o trimestre já foi salvo anteriormente, carrega os valores do histórico (com aviso em amber) em vez dos valores das NFS-e.
+4. O usuário pode editar os valores de faturamento manualmente.
+5. Botão **Restaurar valores das NFS-e** (ícone RotateCcw): desfaz edições manuais e volta aos valores calculados das NFS-e.
+6. Cálculo em tempo real — qualquer edição atualiza os resultados instantaneamente.
+7. Botão **Premissas** → modal para editar alíquotas por empresa.
+8. Botão **Salvar Trimestre** → persiste no histórico (`INSERT OR REPLACE`).
+9. Histórico sempre visível abaixo da calculadora (com estado vazio se não houver registros).
+
+#### Fórmulas de cálculo
+
+```typescript
+const fat = fat1 + fat2 + fat3
+const base = fat * p.presuncao                               // base de presunção
+const irpj_bruto = base * p.aliq_irpj                       // 15% sobre a base
+const adicional = Math.max(0, base - p.limite_adicional) * p.aliq_adicional_ir  // 10% s/ excedente
+const irrf = fat * p.aliq_irrf                              // IRRF retido pelo tomador
+const irpj_recolher = Math.max(0, irpj_bruto + adicional - irrf)
+
+const csll_bruto = base * p.aliq_csll                       // 9% sobre a base
+const csll_ret = fat * p.aliq_csll_retida                   // CSLL retida pelo tomador
+const csll_recolher = Math.max(0, csll_bruto - csll_ret)
+
+const pis = fat * p.aliq_pis                                // apurado (0,65%)
+const cofins = fat * p.aliq_cofins                          // apurado (3%)
+
+// Quando pis_cofins_retidos = 1: não entram no DARF
+const pis_a_pagar = p.pis_cofins_retidos ? 0 : pis
+const cofins_a_pagar = p.pis_cofins_retidos ? 0 : cofins
+
+const total_tributos = irpj_recolher + csll_recolher + pis_a_pagar + cofins_a_pagar
+const carga_efetiva = fat > 0 ? (irpj_recolher + csll_recolher + pis + cofins) / fat : 0
+```
+
+> **Carga efetiva** sempre inclui PIS+COFINS mesmo quando retidos, pois representam custo real mesmo que não gerem DARF.
+
+#### PIS/COFINS retidos na fonte
+
+Quando `pis_cofins_retidos = 1` (padrão para empresas de serviço):
+- Os valores apurados de PIS e COFINS são **exibidos como referência** na interface.
+- Um badge verde indica `"100% retidos na fonte — DARF: R$ 0,00"`.
+- Apenas IRPJ + CSLL compõem o **Total a Recolher (DARF)**.
+
+#### Premissas por empresa
+
+Armazenadas em `tributos_premissas` (uma linha por empresa, criada com `INSERT OR IGNORE` no primeiro acesso):
+
+| Campo | Default | Descrição |
+|-------|---------|-----------|
+| `presuncao` | 32% | Percentual de presunção sobre o faturamento |
+| `aliq_irpj` | 15% | Alíquota IRPJ |
+| `aliq_adicional_ir` | 10% | Adicional IR sobre base que exceder `limite_adicional` |
+| `aliq_csll` | 9% | Alíquota CSLL |
+| `limite_adicional` | R$ 60.000 | Teto trimestral da base para o adicional IR |
+| `aliq_pis` | 0,65% | Alíquota PIS (cumulativo) |
+| `aliq_cofins` | 3% | Alíquota COFINS (cumulativo) |
+| `aliq_irrf` | 1,5% | IRRF retido pelo tomador sobre o faturamento |
+| `aliq_csll_retida` | 1% | CSLL retida pelo tomador sobre o faturamento |
+| `pis_cofins_retidos` | 1 | 1 = PIS/COFINS 100% retidos (DARF = R$0) |
+
+#### Histórico trimestral
+
+Tabela `tributos_historico` com `UNIQUE(empresa_id, ano, trimestre)`:
+- Upsert via `INSERT OR REPLACE` — salvar o mesmo trimestre duas vezes sobrescreve.
+- Campos salvos: faturamento por mês, todos os valores calculados (brutos, retenções, a recolher), total e carga efetiva.
+- Ordenado por `ano DESC, trimestre DESC` na exibição.
+- Ação **Excluir** por linha no histórico.
+
+---
+
+### 4. Empresas SEFAZ
+
+**Componente:** `src/pages/sefaz/SefazEmpresasPage.tsx`  
+**Queries:** `electron/database/queries/sefaz.ts` — `sefazEmpresasQueries`
+
+Cada empresa cadastrada aqui é usada para autenticar nas APIs da SEFAZ (NF-e) e ADN (NFS-e).
+
+| Campo | Descrição |
+|-------|-----------|
+| `nome` | Razão social |
+| `cnpj` | CNPJ (usado para classificar tipo emitida/recebida nas NFS-e) |
+| `uf` | UF da empresa |
+| `pfx_b64` | Certificado digital A1 em Base64 (arquivo `.pfx`) |
+| `pfx_senha` | Senha do certificado A1 |
+| `ambiente` | `'producao'` ou `'homologacao'` |
+| `ultimo_nsu` | Último NSU consultado na SEFAZ (controle de paginação NF-e) |
+| `ultimo_nsu_nfse` | Último NSU consultado na ADN (controle de paginação NFS-e) |
+| `sefaz_consultas_count` | Número de consultas no dia atual (SEFAZ tem limite de 19/dia) |
+| `sefaz_consultas_data` | Data das consultas contadas |
+| `sefaz_cooldown_ate` | Timestamp ISO de quando o cooldown expira |
+
+---
+
+### 5. Destinatários
+
+**Componente:** `src/pages/sefaz/SefazDestinatariosPage.tsx`  
+**Queries:** `electron/database/queries/sefaz.ts` — `sefazDestinatariosQueries`
+
+Lista simples de nome + e-mail usada nos modais de envio de NF-e e NFS-e por e-mail. Exclusão lógica (`ativo = 0`).
+
+---
+
+### SearchableSelect — Componente interno
+
+Usado nos modais de exportação (empresa, unidade, centro de custo) tanto em `SefazNFesPage` quanto em `NfseServicosPage`. Implementado inline em cada arquivo (não extraído para componente global). Funcionalidades:
+- Dropdown com campo de busca embutido (abre `input` com `autoFocus`)
+- Fechar ao clicar fora (`mousedown` listener no documento)
+- Visual consistente com o resto da UI (Tailwind + dark theme)
+
+---
+
+## Guia de Implantação do Módulo Monitor NF (para outra IA ou desenvolvedor)
+
+Este guia lista **exatamente o que precisa ser criado/modificado** para implantar o módulo Monitor NF do zero em um projeto Electron + React + TypeScript + better-sqlite3.
+
+### Pré-requisitos no projeto base
+
+- Electron com `ipcMain` / `ipcRenderer` / `contextBridge`
+- better-sqlite3 com instância singleton (`getDb()`)
+- React + Tailwind CSS
+
+---
+
+### Passo 1 — Migrations (`electron/database/migrations.ts`)
+
+Adicionar as tabelas abaixo na função de migrations. Usar `CREATE TABLE IF NOT EXISTS` para idempotência.
+
+```sql
+-- Empresas com certificado digital A1
+CREATE TABLE IF NOT EXISTS sefaz_empresas (
+  id INTEGER PRIMARY KEY,
+  nome TEXT NOT NULL,
+  cnpj TEXT NOT NULL,
+  uf TEXT DEFAULT '',
+  pfx_b64 TEXT,
+  pfx_senha TEXT,
+  ambiente TEXT DEFAULT 'producao',
+  ultimo_nsu TEXT DEFAULT '0',
+  ultimo_nsu_nfse TEXT DEFAULT '0',
+  sefaz_consultas_count INTEGER DEFAULT 0,
+  sefaz_consultas_data TEXT DEFAULT '',
+  sefaz_cooldown_ate TEXT DEFAULT '',
+  ativo INTEGER DEFAULT 1
+);
+
+-- NF-es recebidas via SEFAZ
+CREATE TABLE IF NOT EXISTS sefaz_nfes (
+  id INTEGER PRIMARY KEY,
+  empresa_id INTEGER NOT NULL,
+  chave_acesso TEXT UNIQUE,
+  nsu TEXT,
+  nf_numero TEXT,
+  nf_data TEXT,
+  fornecedor_cnpj TEXT,
+  fornecedor_nome TEXT,
+  valor_nota REAL DEFAULT 0,
+  status_pagamento TEXT DEFAULT 'pendente',
+  data_pagamento TEXT,
+  email_enviado INTEGER DEFAULT 0,
+  xml_blob TEXT,
+  tipo_nfe TEXT DEFAULT 'procNFe',
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  FOREIGN KEY (empresa_id) REFERENCES sefaz_empresas(id)
+);
+
+-- Destinatários de e-mail
+CREATE TABLE IF NOT EXISTS sefaz_destinatarios (
+  id INTEGER PRIMARY KEY,
+  nome TEXT NOT NULL,
+  email TEXT NOT NULL,
+  ativo INTEGER DEFAULT 1
+);
+
+-- NFS-e via API ADN Nacional
+CREATE TABLE IF NOT EXISTS nfse_servicos (
+  id INTEGER PRIMARY KEY,
+  empresa_id INTEGER NOT NULL,
+  chave_acesso TEXT UNIQUE,
+  nsu TEXT,
+  numero TEXT,
+  serie TEXT,
+  competencia TEXT,
+  prestador_cnpj TEXT,
+  prestador_nome TEXT,
+  valor_servicos REAL DEFAULT 0,
+  descricao TEXT,
+  status_pagamento TEXT DEFAULT 'pendente',
+  data_pagamento TEXT,
+  xml_blob TEXT,
+  fonte TEXT DEFAULT 'adn',
+  tipo TEXT DEFAULT 'recebida',
+  cancelada INTEGER DEFAULT 0,
+  email_enviado INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  FOREIGN KEY (empresa_id) REFERENCES sefaz_empresas(id)
+);
+
+-- Premissas tributárias por empresa (criadas on-demand)
+CREATE TABLE IF NOT EXISTS tributos_premissas (
+  id INTEGER PRIMARY KEY,
+  empresa_id INTEGER NOT NULL UNIQUE,
+  presuncao REAL DEFAULT 0.32,
+  aliq_irpj REAL DEFAULT 0.15,
+  aliq_adicional_ir REAL DEFAULT 0.10,
+  aliq_csll REAL DEFAULT 0.09,
+  limite_adicional REAL DEFAULT 60000,
+  aliq_pis REAL DEFAULT 0.0065,
+  aliq_cofins REAL DEFAULT 0.03,
+  aliq_irrf REAL DEFAULT 0.015,
+  aliq_csll_retida REAL DEFAULT 0.01,
+  pis_cofins_retidos INTEGER DEFAULT 1,
+  FOREIGN KEY (empresa_id) REFERENCES sefaz_empresas(id)
+);
+
+-- Histórico de trimestres calculados
+CREATE TABLE IF NOT EXISTS tributos_historico (
+  id INTEGER PRIMARY KEY,
+  empresa_id INTEGER NOT NULL,
+  ano INTEGER NOT NULL,
+  trimestre INTEGER NOT NULL,
+  fat_mes1 REAL DEFAULT 0,
+  fat_mes2 REAL DEFAULT 0,
+  fat_mes3 REAL DEFAULT 0,
+  fat_total REAL DEFAULT 0,
+  base_irpj REAL DEFAULT 0,
+  irpj_bruto REAL DEFAULT 0,
+  adicional_ir REAL DEFAULT 0,
+  irrf_retido REAL DEFAULT 0,
+  irpj_a_recolher REAL DEFAULT 0,
+  csll_bruto REAL DEFAULT 0,
+  csll_retida REAL DEFAULT 0,
+  csll_a_recolher REAL DEFAULT 0,
+  pis REAL DEFAULT 0,
+  cofins REAL DEFAULT 0,
+  total_tributos REAL DEFAULT 0,
+  carga_efetiva REAL DEFAULT 0,
+  observacao TEXT,
+  created_at TEXT DEFAULT (datetime('now','localtime')),
+  UNIQUE(empresa_id, ano, trimestre),
+  FOREIGN KEY (empresa_id) REFERENCES sefaz_empresas(id)
+);
+```
+
+**Backfill obrigatório** — adicionar fora do `try/catch`, executado a cada startup:
+```sql
+-- Reclassifica NFS-e existentes onde o prestador é a própria empresa
+UPDATE nfse_servicos SET tipo = 'emitida'
+WHERE replace(replace(replace(prestador_cnpj,'.',''),'/',''),'-','') = (
+  SELECT replace(replace(replace(cnpj,'.',''),'/',''),'-','')
+  FROM sefaz_empresas WHERE sefaz_empresas.id = nfse_servicos.empresa_id
+)
+```
+
+---
+
+### Passo 2 — Queries (`electron/database/queries/`)
+
+Criar três arquivos:
+
+#### `sefaz.ts`
+Exportar três objetos: `sefazEmpresasQueries`, `sefazNfesQueries`, `sefazDestinatariosQueries`.
+- Empresas: `list`, `get`, `create`, `update`, `delete` (lógico: `ativo=0`), `atualizarNsu`, `atualizarNsuNfse`, `getEstadoRateLimit`, `registrarConsulta`, `ativarCooldown`, `limparCooldown`
+- NF-es: `list(filtros)` com filtros dinâmicos, `inserir` (INSERT OR IGNORE), `atualizarCompleta` (resNFe → procNFe), `buscarXml`, `togglePagamento`, `marcarEmailEnviado`
+- Destinatários: `list`, `create`, `delete` (lógico)
+
+#### `nfse.ts`
+Exportar `nfseServicosQueries`:
+- `list(filtros)`: suporta filtros `empresa_id`, `prestador`, `ano`, `competencia`, `status_pagamento`, `fonte`, `tipo`
+- `inserir`: INSERT OR IGNORE pelo `chave_acesso`
+- `anosDisponiveis(empresaId)`: DISTINCT dos 4 primeiros chars da competência
+- `buscarXml`, `togglePagamento`, `marcarCancelada`, `marcarEmailEnviado`
+- `listarParaEventos`: SELECT das últimas 200 com chave numérica de 44 dígitos
+- `deletarTodos(empresaId)`: usado no reimportar
+
+#### `tributos.ts`
+Exportar `tributosQueries`:
+- `getPremissas(empresa_id)`: INSERT OR IGNORE + SELECT (auto-cria com defaults)
+- `savePremissas(empresa_id, data)`: UPDATE todos os campos
+- `getFaturamentoTrimestre(empresa_id, ano, trimestre)`: SUM de `valor_servicos` WHERE `tipo='emitida' AND fonte='adn'` por mês
+- `salvarHistorico(data)`: INSERT OR REPLACE (upsert pelo UNIQUE)
+- `getHistorico(empresa_id)`: ORDER BY ano DESC, trimestre DESC
+- `getHistoricoTrimestre(empresa_id, ano, trimestre)`: linha única
+- `deleteHistorico(id)`: DELETE físico
+
+---
+
+### Passo 3 — Handlers IPC (`electron/main.ts`)
+
+Adicionar os seguintes `ipcMain.handle`:
+
+```typescript
+// Empresas SEFAZ
+ipcMain.handle('sefaz:empresas:list', () => sefazEmpresasQueries.list())
+ipcMain.handle('sefaz:empresas:create', (_, data) => sefazEmpresasQueries.create(data))
+ipcMain.handle('sefaz:empresas:update', (_, id, data) => sefazEmpresasQueries.update(id, data))
+ipcMain.handle('sefaz:empresas:delete', (_, id) => sefazEmpresasQueries.delete(id))
+ipcMain.handle('sefaz:empresas:pickPfx', async () => {
+  const { canceled, filePaths } = await dialog.showOpenDialog({ filters: [{ name: 'Certificado', extensions: ['pfx'] }] })
+  if (canceled) return null
+  return fs.readFileSync(filePaths[0]).toString('base64')
+})
+
+// NF-es SEFAZ
+ipcMain.handle('sefaz:nfes:list', (_, filtros) => sefazNfesQueries.list(filtros))
+ipcMain.handle('sefaz:nfes:buscarXml', (_, id) => sefazNfesQueries.buscarXml(id))
+ipcMain.handle('sefaz:nfes:togglePagamento', (_, id) => sefazNfesQueries.togglePagamento(id))
+ipcMain.handle('sefaz:nfes:marcarEmailEnviado', (_, id) => sefazNfesQueries.marcarEmailEnviado(id))
+ipcMain.handle('sefaz:nfes:exportarNF', (_, payload) => { /* criar NF no Controle de NF */ })
+
+// Consulta SEFAZ (com rate limiting e manifestação)
+ipcMain.handle('sefaz:consultar', async (event, empresaId) => { /* chama electron/sefaz/consulta.ts */ })
+
+// Destinatários
+ipcMain.handle('sefaz:destinatarios:list', () => sefazDestinatariosQueries.list())
+ipcMain.handle('sefaz:destinatarios:create', (_, nome, email) => sefazDestinatariosQueries.create(nome, email))
+ipcMain.handle('sefaz:destinatarios:delete', (_, id) => sefazDestinatariosQueries.delete(id))
+
+// NFS-e ADN
+ipcMain.handle('nfse:servicos:list', (_, filtros) => nfseServicosQueries.list(filtros))
+ipcMain.handle('nfse:servicos:anosDisponiveis', (_, empresaId) => nfseServicosQueries.anosDisponiveis(empresaId))
+ipcMain.handle('nfse:servicos:buscarXml', (_, id) => nfseServicosQueries.buscarXml(id))
+ipcMain.handle('nfse:servicos:togglePagamento', (_, id) => nfseServicosQueries.togglePagamento(id))
+ipcMain.handle('nfse:servicos:marcarEmailEnviado', (_, id) => nfseServicosQueries.marcarEmailEnviado(id))
+ipcMain.handle('nfse:consultar', async (event, empresaId) => {
+  const empresa = sefazEmpresasQueries.get(empresaId)
+  // Para cada NFS-e recebida da API ADN:
+  const cnpjEmpresa = empresa.cnpj.replace(/\D/g, '')
+  const tipo = s.prestador_cnpj.replace(/\D/g, '') === cnpjEmpresa ? 'emitida' : 'recebida'
+  nfseServicosQueries.inserir({ ...s, tipo, fonte: 'adn' })
+})
+ipcMain.handle('nfse:reimportar', async (event, empresaId) => {
+  nfseServicosQueries.deletarTodos(empresaId)
+  // mesma lógica do consultar mas do zero
+})
+ipcMain.handle('nfse:verificarEventos', (_, empresaId) => { /* verifica cancelamentos ADN */ })
+ipcMain.handle('nfse:exportarNF', (_, payload) => { /* criar NF no Controle de NF */ })
+
+// Tributos
+ipcMain.handle('tributos:getPremissas', (_, empresa_id) => tributosQueries.getPremissas(empresa_id))
+ipcMain.handle('tributos:savePremissas', (_, empresa_id, data) => tributosQueries.savePremissas(empresa_id, data))
+ipcMain.handle('tributos:getFaturamento', (_, empresa_id, ano, trimestre) => tributosQueries.getFaturamentoTrimestre(empresa_id, ano, trimestre))
+ipcMain.handle('tributos:salvarTrimestre', (_, data) => tributosQueries.salvarHistorico(data))
+ipcMain.handle('tributos:getHistorico', (_, empresa_id) => tributosQueries.getHistorico(empresa_id))
+ipcMain.handle('tributos:getHistoricoTrimestre', (_, empresa_id, ano, trimestre) => tributosQueries.getHistoricoTrimestre(empresa_id, ano, trimestre))
+ipcMain.handle('tributos:deleteHistorico', (_, id) => tributosQueries.deleteHistorico(id))
+```
+
+**Progresso em tempo real:** usar `event.sender.send('sefaz:progress', msg)` e `event.sender.send('nfse:progress', msg)` para enviar mensagens de andamento durante consultas longas.
+
+---
+
+### Passo 4 — Preload (`electron/preload.ts`)
+
+Expor via `contextBridge.exposeInMainWorld('api', { ... })`:
+
+```typescript
+sefaz: {
+  empresas: {
+    list: () => ipcRenderer.invoke('sefaz:empresas:list'),
+    create: (data) => ipcRenderer.invoke('sefaz:empresas:create', data),
+    update: (id, data) => ipcRenderer.invoke('sefaz:empresas:update', id, data),
+    delete: (id) => ipcRenderer.invoke('sefaz:empresas:delete', id),
+    pickPfx: () => ipcRenderer.invoke('sefaz:empresas:pickPfx'),
+  },
+  nfes: {
+    list: (filtros) => ipcRenderer.invoke('sefaz:nfes:list', filtros),
+    buscarXml: (id) => ipcRenderer.invoke('sefaz:nfes:buscarXml', id),
+    togglePagamento: (id) => ipcRenderer.invoke('sefaz:nfes:togglePagamento', id),
+    marcarEmailEnviado: (id) => ipcRenderer.invoke('sefaz:nfes:marcarEmailEnviado', id),
+    exportarNF: (payload) => ipcRenderer.invoke('sefaz:nfes:exportarNF', payload),
+  },
+  consultar: (empresaId) => ipcRenderer.invoke('sefaz:consultar', empresaId),
+  email: { enviar: (dados) => ipcRenderer.invoke('sefaz:email:enviar', dados) },
+  destinatarios: {
+    list: () => ipcRenderer.invoke('sefaz:destinatarios:list'),
+    create: (nome, email) => ipcRenderer.invoke('sefaz:destinatarios:create', nome, email),
+    delete: (id) => ipcRenderer.invoke('sefaz:destinatarios:delete', id),
+  },
+  onProgress: (cb) => ipcRenderer.on('sefaz:progress', (_, msg) => cb(msg)),
+},
+nfse: {
+  servicos: {
+    list: (filtros) => ipcRenderer.invoke('nfse:servicos:list', filtros),
+    anosDisponiveis: (id) => ipcRenderer.invoke('nfse:servicos:anosDisponiveis', id),
+    buscarXml: (id) => ipcRenderer.invoke('nfse:servicos:buscarXml', id),
+    togglePagamento: (id) => ipcRenderer.invoke('nfse:servicos:togglePagamento', id),
+    marcarEmailEnviado: (id) => ipcRenderer.invoke('nfse:servicos:marcarEmailEnviado', id),
+  },
+  consultar: (id) => ipcRenderer.invoke('nfse:consultar', id),
+  reimportar: (id) => ipcRenderer.invoke('nfse:reimportar', id),
+  verificarEventos: (id) => ipcRenderer.invoke('nfse:verificarEventos', id),
+  exportarNF: (payload) => ipcRenderer.invoke('nfse:exportarNF', payload),
+  onProgress: (cb) => ipcRenderer.on('nfse:progress', (_, msg) => cb(msg)),
+},
+tributos: {
+  getPremissas: (id) => ipcRenderer.invoke('tributos:getPremissas', id),
+  savePremissas: (id, data) => ipcRenderer.invoke('tributos:savePremissas', id, data),
+  getFaturamento: (id, ano, trim) => ipcRenderer.invoke('tributos:getFaturamento', id, ano, trim),
+  salvarTrimestre: (data) => ipcRenderer.invoke('tributos:salvarTrimestre', data),
+  getHistorico: (id) => ipcRenderer.invoke('tributos:getHistorico', id),
+  getHistoricoTrimestre: (id, ano, trim) => ipcRenderer.invoke('tributos:getHistoricoTrimestre', id, ano, trim),
+  deleteHistorico: (id) => ipcRenderer.invoke('tributos:deleteHistorico', id),
+},
+```
+
+---
+
+### Passo 5 — Componentes React (`src/pages/sefaz/`)
+
+Criar os seguintes arquivos (ver código-fonte neste repositório como referência):
+
+| Arquivo | Responsabilidade |
+|---------|-----------------|
+| `SefazPage.tsx` | Shell com sub-abas (`nfes`, `nfse`, `tributos`, `empresas`, `destinatarios`) |
+| `SefazNFesPage.tsx` | Lista NF-es recebidas SEFAZ com filtros, ações e modais |
+| `NfseServicosPage.tsx` | Lista NFS-e com badges emitida/recebida, filtros e modais |
+| `TributosPage.tsx` | Calculadora trimestral + histórico + modal de premissas |
+| `SefazEmpresasPage.tsx` | CRUD de empresas SEFAZ com upload de certificado |
+| `SefazDestinatariosPage.tsx` | CRUD simples de destinatários |
+
+**Padrões importantes:**
+- `INSERT OR IGNORE` no backend → sem duplicatas por `chave_acesso`
+- Filtros passados como objeto ao IPC; construção de SQL dinâmica com `params` nomeados
+- `onProgress` registrado via `ipcRenderer.on` no `useEffect`, removido no cleanup
+- Selects com busca (`SearchableSelect`) nos modais de exportação
+- Modal de exportação para Controle de NF: lê CNPJ do XML, busca empresa correspondente, cria fornecedor automaticamente se não existir
+
+---
+
+### Passo 6 — Integrações externas
+
+#### SEFAZ NF-e (`electron/sefaz/consulta.ts`)
+- Protocolo SOAP/HTTPS com certificado mTLS
+- Endpoint: webservice de Distribuição de Documentos Fiscais da SEFAZ nacional
+- Resposta XML parsada com `xml2js` ou regex
+- Implementar rate limiting: máximo 19 requisições/dia; cooldown de 65 min ao ser bloqueado
+
+#### ADN Nacional NFS-e (`electron/nfse/consulta.ts`)
+- API REST com autenticação por certificado A1
+- Paginação por NSU: iterar até não receber mais documentos
+- Retorna emitidas e recebidas misturadas — classificar pelo CNPJ do prestador
+- Implementar `verificarEventos` separado para checar cancelamentos
+
+---
+
 ## Integração Futura com nfe-monitor
 
 | Dado do nfe-monitor | Mapeamento no Controle NF_Caixa |
