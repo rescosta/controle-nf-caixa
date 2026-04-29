@@ -190,33 +190,45 @@ NFS-e consultadas via API ADN/BHISS.
 | email_enviado | 0/1 |
 
 #### `tributos_premissas`
-Uma linha por empresa. Criada automaticamente com defaults no primeiro acesso.
+Uma linha por empresa. Criada automaticamente com defaults no primeiro acesso (`INSERT OR IGNORE`).
 
 | Coluna | Default | Descrição |
 |--------|---------|-----------|
-| presuncao | 0.32 | % de presunção sobre faturamento |
-| aliq_irpj | 0.15 | Alíquota IRPJ |
-| aliq_adicional_ir | 0.10 | Adicional IR sobre base > limite |
-| aliq_csll | 0.09 | Alíquota CSLL |
-| limite_adicional | 60000 | Limite trimestral do adicional IR |
-| aliq_pis | 0.0065 | Alíquota PIS |
-| aliq_cofins | 0.03 | Alíquota COFINS |
-| aliq_irrf | 0.015 | IRRF retido pelo tomador |
-| aliq_csll_retida | 0.01 | CSLL retida pelo tomador |
-| pis_cofins_retidos | 1 | 1 = PIS/COFINS 100% retidos na fonte (DARF = R$0) |
+| `tipo_empresa` | `'servicos'` | Tipo de atividade: `'servicos'`, `'imobiliaria'` ou `'comercio'` — controla os defaults de presunção |
+| `presuncao` | 0.32 | % de presunção IRPJ (32% serviços, 8% imobiliária/comércio) |
+| `presuncao_csll` | 0.32 | % de presunção CSLL — **pode diferir do IRPJ** (32% serviços, 12% imobiliária/comércio) |
+| `aliq_irpj` | 0.15 | Alíquota IRPJ |
+| `aliq_adicional_ir` | 0.10 | Adicional IR sobre base > limite |
+| `aliq_csll` | 0.09 | Alíquota CSLL |
+| `limite_adicional` | 60000 | Limite trimestral do adicional IR |
+| `aliq_pis` | 0.0065 | Alíquota PIS |
+| `aliq_cofins` | 0.03 | Alíquota COFINS |
+| `aliq_irrf` | 0.015 | IRRF retido pelo tomador |
+| `aliq_csll_retida` | 0.01 | CSLL retida pelo tomador |
+| `pis_cofins_retidos` | 1 | 1 = PIS/COFINS 100% retidos na fonte (DARF = R$0) |
+
+**Presunções por tipo de atividade (Lucro Presumido):**
+
+| Tipo | `presuncao` (IRPJ) | `presuncao_csll` (CSLL) |
+|------|-------------------|------------------------|
+| Serviços | 32% | 32% |
+| Imobiliária / Loteamento | 8% | 12% |
+| Comércio / Indústria | 8% | 12% |
 
 #### `tributos_historico`
 Um registro por empresa × trimestre (`UNIQUE empresa_id, ano, trimestre`). Upsert via `INSERT OR REPLACE`.
 
 | Coluna | Descrição |
 |--------|-----------|
-| fat_mes1/2/3, fat_total | Faturamento por mês e total |
-| base_irpj | fat_total × presuncao |
-| irpj_bruto, adicional_ir, irrf_retido, irpj_a_recolher | Decomposição IRPJ |
-| csll_bruto, csll_retida, csll_a_recolher | Decomposição CSLL |
-| pis, cofins | Valores apurados (gross — independe de retenção) |
-| total_tributos | Total a recolher via DARF (IRPJ + CSLL + pis/cofins_a_pagar) |
-| carga_efetiva | (IRPJ + CSLL + PIS + COFINS) / fat_total |
+| `fat_mes1/2/3`, `fat_total` | Faturamento por mês e total do trimestre |
+| `outras_receitas` | Receitas financeiras, juros etc. — entram 100% na base sem percentual de presunção |
+| `base_irpj` | `fat_total × presuncao + outras_receitas` |
+| `base_csll` | `fat_total × presuncao_csll + outras_receitas` (pode diferir de base_irpj) |
+| `irpj_bruto`, `adicional_ir`, `irrf_retido`, `irpj_a_recolher` | Decomposição IRPJ |
+| `csll_bruto`, `csll_retida`, `csll_a_recolher` | Decomposição CSLL |
+| `pis`, `cofins` | Valores apurados (brutos — independem de retenção) |
+| `total_tributos` | Total a recolher via DARF (IRPJ + CSLL + pis/cofins_a_pagar) |
+| `carga_efetiva` | (IRPJ + CSLL + PIS + COFINS) / fat_total — inclui retidos |
 
 #### `settings`
 Chave-valor. Principais chaves:
@@ -566,78 +578,92 @@ O cálculo é feito no handler `nfse:consultar` em `electron/main.ts` antes de c
 
 #### Objetivo
 
-Calcular automaticamente os tributos federais trimestrais (IRPJ, CSLL, PIS, COFINS) para empresas de serviço no regime de **Lucro Presumido**, com base nas NFS-e **emitidas** do período.
+Calcular automaticamente os tributos federais trimestrais (IRPJ, CSLL, PIS, COFINS) para empresas no regime de **Lucro Presumido**, com suporte a diferentes tipos de atividade (serviços, imobiliária/loteamento, comércio/indústria).
 
 #### Fluxo de uso
 
 1. Selecionar empresa + ano + trimestre.
-2. O sistema busca o faturamento de cada mês do trimestre nas NFS-e emitidas (`fonte='adn'`, `tipo='emitida'`).
-3. Se o trimestre já foi salvo anteriormente, carrega os valores do histórico (com aviso em amber) em vez dos valores das NFS-e.
-4. O usuário pode editar os valores de faturamento manualmente.
-5. Botão **Restaurar valores das NFS-e** (ícone RotateCcw): desfaz edições manuais e volta aos valores calculados das NFS-e.
-6. Cálculo em tempo real — qualquer edição atualiza os resultados instantaneamente.
-7. Botão **Premissas** → modal para editar alíquotas por empresa.
+2. O sistema busca o faturamento de cada mês nas NFS-e emitidas (`fonte='adn'`, `tipo='emitida'`).
+3. Se o trimestre já foi salvo, carrega valores do histórico (aviso amber) em vez das NFS-e.
+4. O usuário pode editar faturamento e "Outras Receitas" manualmente.
+5. Botão **NFS-e** (RotateCcw): restaura valores originais das NFS-e e zera outras receitas.
+6. Cálculo em tempo real — qualquer edição atualiza instantaneamente.
+7. Botão **Premissas** → modal com seletor de tipo de atividade + alíquotas editáveis.
 8. Botão **Salvar Trimestre** → persiste no histórico (`INSERT OR REPLACE`).
-9. Histórico sempre visível abaixo da calculadora (com estado vazio se não houver registros).
+9. Histórico sempre visível abaixo (estado vazio quando sem registros).
 
 #### Fórmulas de cálculo
 
 ```typescript
 const fat = fat1 + fat2 + fat3
-const base = fat * p.presuncao                               // base de presunção
-const irpj_bruto = base * p.aliq_irpj                       // 15% sobre a base
-const adicional = Math.max(0, base - p.limite_adicional) * p.aliq_adicional_ir  // 10% s/ excedente
-const irrf = fat * p.aliq_irrf                              // IRRF retido pelo tomador
+// Outras receitas (juros, rendimentos) entram 100% na base sem percentual de presunção
+const base_irpj = fat * p.presuncao + outras_receitas
+const base_csll  = fat * p.presuncao_csll + outras_receitas   // pode diferir do IRPJ
+
+const irpj_bruto = base_irpj * p.aliq_irpj                   // 15% sobre base IRPJ
+const adicional  = Math.max(0, base_irpj - p.limite_adicional) * p.aliq_adicional_ir
+const irrf       = fat * p.aliq_irrf                          // IRRF retido pelo tomador
 const irpj_recolher = Math.max(0, irpj_bruto + adicional - irrf)
 
-const csll_bruto = base * p.aliq_csll                       // 9% sobre a base
-const csll_ret = fat * p.aliq_csll_retida                   // CSLL retida pelo tomador
+const csll_bruto = base_csll * p.aliq_csll                   // 9% sobre base CSLL
+const csll_ret   = fat * p.aliq_csll_retida                  // CSLL retida pelo tomador
 const csll_recolher = Math.max(0, csll_bruto - csll_ret)
 
-const pis = fat * p.aliq_pis                                // apurado (0,65%)
-const cofins = fat * p.aliq_cofins                          // apurado (3%)
-
-// Quando pis_cofins_retidos = 1: não entram no DARF
-const pis_a_pagar = p.pis_cofins_retidos ? 0 : pis
+const pis    = fat * p.aliq_pis     // 0,65% apurado
+const cofins = fat * p.aliq_cofins  // 3% apurado
+const pis_a_pagar    = p.pis_cofins_retidos ? 0 : pis
 const cofins_a_pagar = p.pis_cofins_retidos ? 0 : cofins
 
 const total_tributos = irpj_recolher + csll_recolher + pis_a_pagar + cofins_a_pagar
-const carga_efetiva = fat > 0 ? (irpj_recolher + csll_recolher + pis + cofins) / fat : 0
+const carga_efetiva  = fat > 0 ? (irpj_recolher + csll_recolher + pis + cofins) / fat : 0
 ```
 
-> **Carga efetiva** sempre inclui PIS+COFINS mesmo quando retidos, pois representam custo real mesmo que não gerem DARF.
+> **Carga efetiva** sempre inclui PIS+COFINS mesmo retidos (custo real, apenas pré-coletado).
+
+#### Tipo de atividade e presunções
+
+O modal de Premissas tem um seletor de tipo que preenche automaticamente `presuncao` e `presuncao_csll`:
+
+| Tipo | Presunção IRPJ | Presunção CSLL | `aliq_irrf` recomendado | `aliq_csll_retida` recomendado |
+|------|---------------|----------------|------------------------|-------------------------------|
+| Serviços | 32% | 32% | 1,5% | 1% |
+| Imobiliária / Loteamento | 8% | 12% | **0%** | **0%** |
+| Comércio / Indústria | 8% | 12% | 0% | 0% |
+
+> **Atenção:** Para imobiliárias que vendem lotes próprios, não há retenção de IRRF nem CSLL pelo tomador (a venda é de imóvel próprio, não prestação de serviço). Zerar `aliq_irrf` e `aliq_csll_retida` nas Premissas.
 
 #### PIS/COFINS retidos na fonte
 
 Quando `pis_cofins_retidos = 1` (padrão para empresas de serviço):
-- Os valores apurados de PIS e COFINS são **exibidos como referência** na interface.
-- Um badge verde indica `"100% retidos na fonte — DARF: R$ 0,00"`.
-- Apenas IRPJ + CSLL compõem o **Total a Recolher (DARF)**.
+- Valores apurados exibidos como referência, sem compor o DARF.
+- Badge verde: `"100% retidos na fonte — DARF: R$ 0,00"`.
+- Para imobiliárias: desmarcar esta opção (PIS/COFINS são recolhidos normalmente).
 
 #### Premissas por empresa
 
-Armazenadas em `tributos_premissas` (uma linha por empresa, criada com `INSERT OR IGNORE` no primeiro acesso):
+Armazenadas em `tributos_premissas` (criada com `INSERT OR IGNORE` no primeiro acesso):
 
 | Campo | Default | Descrição |
 |-------|---------|-----------|
-| `presuncao` | 32% | Percentual de presunção sobre o faturamento |
+| `tipo_empresa` | `'servicos'` | Tipo: `'servicos'`, `'imobiliaria'`, `'comercio'` |
+| `presuncao` | 32% | Presunção IRPJ |
+| `presuncao_csll` | 32% | Presunção CSLL — independente do IRPJ |
 | `aliq_irpj` | 15% | Alíquota IRPJ |
-| `aliq_adicional_ir` | 10% | Adicional IR sobre base que exceder `limite_adicional` |
+| `aliq_adicional_ir` | 10% | Adicional IR sobre base > limite |
 | `aliq_csll` | 9% | Alíquota CSLL |
-| `limite_adicional` | R$ 60.000 | Teto trimestral da base para o adicional IR |
-| `aliq_pis` | 0,65% | Alíquota PIS (cumulativo) |
-| `aliq_cofins` | 3% | Alíquota COFINS (cumulativo) |
-| `aliq_irrf` | 1,5% | IRRF retido pelo tomador sobre o faturamento |
-| `aliq_csll_retida` | 1% | CSLL retida pelo tomador sobre o faturamento |
-| `pis_cofins_retidos` | 1 | 1 = PIS/COFINS 100% retidos (DARF = R$0) |
+| `limite_adicional` | R$ 60.000 | Teto trimestral do adicional IR |
+| `aliq_pis` | 0,65% | Alíquota PIS |
+| `aliq_cofins` | 3% | Alíquota COFINS |
+| `aliq_irrf` | 1,5% | IRRF retido pelo tomador (0% para imobiliária) |
+| `aliq_csll_retida` | 1% | CSLL retida pelo tomador (0% para imobiliária) |
+| `pis_cofins_retidos` | 1 | 1 = DARF PIS/COFINS = R$0 (desmarcar para imobiliária) |
 
 #### Histórico trimestral
 
-Tabela `tributos_historico` com `UNIQUE(empresa_id, ano, trimestre)`:
-- Upsert via `INSERT OR REPLACE` — salvar o mesmo trimestre duas vezes sobrescreve.
-- Campos salvos: faturamento por mês, todos os valores calculados (brutos, retenções, a recolher), total e carga efetiva.
-- Ordenado por `ano DESC, trimestre DESC` na exibição.
-- Ação **Excluir** por linha no histórico.
+Tabela `tributos_historico` com `UNIQUE(empresa_id, ano, trimestre)` — upsert via `INSERT OR REPLACE`:
+- Salva faturamento por mês, `outras_receitas`, `base_irpj`, `base_csll` separadas, todos os valores calculados, total e carga efetiva.
+- Ordenado por `ano DESC, trimestre DESC`.
+- Ação **Excluir** por linha.
 
 ---
 
