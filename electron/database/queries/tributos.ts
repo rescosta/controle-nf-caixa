@@ -3,7 +3,9 @@ import { getDb } from '../db'
 export interface TributosPremissas {
   id: number
   empresa_id: number
-  presuncao: number
+  tipo_empresa: string        // 'servicos' | 'imobiliaria' | 'comercio'
+  presuncao: number           // % de presunção IRPJ
+  presuncao_csll: number      // % de presunção CSLL (difere do IRPJ em imobiliárias: 8% vs 12%)
   aliq_irpj: number
   aliq_adicional_ir: number
   aliq_csll: number
@@ -24,7 +26,9 @@ export interface TributosHistorico {
   fat_mes2: number
   fat_mes3: number
   fat_total: number
+  outras_receitas: number     // entram 100% na base sem percentual de presunção
   base_irpj: number
+  base_csll: number           // base CSLL separada (difere do IRPJ em imobiliárias)
   irpj_bruto: number
   adicional_ir: number
   irrf_retido: number
@@ -58,7 +62,9 @@ export const tributosQueries = {
   savePremissas(empresa_id: number, data: Partial<TributosPremissas>): void {
     getDb().prepare(`
       UPDATE tributos_premissas SET
+        tipo_empresa = @tipo_empresa,
         presuncao = @presuncao,
+        presuncao_csll = @presuncao_csll,
         aliq_irpj = @aliq_irpj,
         aliq_adicional_ir = @aliq_adicional_ir,
         aliq_csll = @aliq_csll,
@@ -93,14 +99,16 @@ export const tributosQueries = {
     getDb().prepare(`
       INSERT OR REPLACE INTO tributos_historico
         (empresa_id, ano, trimestre,
-         fat_mes1, fat_mes2, fat_mes3, fat_total,
-         base_irpj, irpj_bruto, adicional_ir, irrf_retido, irpj_a_recolher,
+         fat_mes1, fat_mes2, fat_mes3, fat_total, outras_receitas,
+         base_irpj, base_csll,
+         irpj_bruto, adicional_ir, irrf_retido, irpj_a_recolher,
          csll_bruto, csll_retida, csll_a_recolher,
          pis, cofins, total_tributos, carga_efetiva, observacao)
       VALUES
         (@empresa_id, @ano, @trimestre,
-         @fat_mes1, @fat_mes2, @fat_mes3, @fat_total,
-         @base_irpj, @irpj_bruto, @adicional_ir, @irrf_retido, @irpj_a_recolher,
+         @fat_mes1, @fat_mes2, @fat_mes3, @fat_total, @outras_receitas,
+         @base_irpj, @base_csll,
+         @irpj_bruto, @adicional_ir, @irrf_retido, @irpj_a_recolher,
          @csll_bruto, @csll_retida, @csll_a_recolher,
          @pis, @cofins, @total_tributos, @carga_efetiva, @observacao)
     `).run(data)

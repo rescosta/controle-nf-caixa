@@ -470,6 +470,14 @@ export function runMigrations(db: Database.Database): void {
   try { db.exec("ALTER TABLE nfse_servicos ADD COLUMN tipo TEXT DEFAULT 'recebida'") } catch { /* já existe */ }
   // Migração: pis_cofins_retidos na tabela tributos_premissas
   try { db.exec('ALTER TABLE tributos_premissas ADD COLUMN pis_cofins_retidos INTEGER DEFAULT 1') } catch { /* já existe */ }
+  // Migração: presuncao_csll e tipo_empresa em tributos_premissas (imobiliárias têm IRPJ 8% e CSLL 12%)
+  try { db.exec("ALTER TABLE tributos_premissas ADD COLUMN presuncao_csll REAL DEFAULT 0.32") } catch { /* já existe */ }
+  try { db.exec("ALTER TABLE tributos_premissas ADD COLUMN tipo_empresa TEXT DEFAULT 'servicos'") } catch { /* já existe */ }
+  // Migração: base_csll e outras_receitas em tributos_historico
+  try { db.exec('ALTER TABLE tributos_historico ADD COLUMN base_csll REAL DEFAULT 0') } catch { /* já existe */ }
+  try { db.exec('ALTER TABLE tributos_historico ADD COLUMN outras_receitas REAL DEFAULT 0') } catch { /* já existe */ }
+  // Backfill: sincronizar base_csll com base_irpj nos registros existentes que não tinham campo separado
+  try { db.exec('UPDATE tributos_historico SET base_csll = base_irpj WHERE base_csll = 0 AND base_irpj > 0') } catch { /* falhou */ }
   // Backfill tipo: marca como 'emitida' os registros onde prestador_cnpj == cnpj da empresa consultada
   try {
     db.exec(`

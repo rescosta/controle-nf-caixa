@@ -5,7 +5,9 @@ import CurrencyInput from '../../components/CurrencyInput'
 interface SefazEmpresa { id: number; nome: string; cnpj: string }
 interface Premissas {
   empresa_id: number
-  presuncao: number
+  tipo_empresa: string
+  presuncao: number       // % de presunção IRPJ
+  presuncao_csll: number  // % de presunção CSLL (pode diferir do IRPJ)
   aliq_irpj: number
   aliq_adicional_ir: number
   aliq_csll: number
@@ -19,7 +21,9 @@ interface Premissas {
 interface Historico {
   id: number; empresa_id: number; ano: number; trimestre: number
   fat_mes1: number; fat_mes2: number; fat_mes3: number; fat_total: number
-  base_irpj: number; irpj_bruto: number; adicional_ir: number
+  outras_receitas: number
+  base_irpj: number; base_csll: number
+  irpj_bruto: number; adicional_ir: number
   irrf_retido: number; irpj_a_recolher: number
   csll_bruto: number; csll_retida: number; csll_a_recolher: number
   pis: number; cofins: number; total_tributos: number; carga_efetiva: number
@@ -32,26 +36,34 @@ const fmtBRL = (v: number) => v.toLocaleString('pt-BR', { style: 'currency', cur
 const fmtPct = (v: number) => `${(v * 100).toFixed(2)}%`
 const anoAtual = new Date().getFullYear()
 
-function calcular(fat1: number, fat2: number, fat3: number, p: Premissas) {
+const TIPOS_EMPRESA = [
+  { value: 'servicos',    label: 'Serviços',                 presuncao: 0.32, presuncao_csll: 0.32 },
+  { value: 'imobiliaria', label: 'Imobiliária / Loteamento', presuncao: 0.08, presuncao_csll: 0.12 },
+  { value: 'comercio',    label: 'Comércio / Indústria',     presuncao: 0.08, presuncao_csll: 0.12 },
+]
+
+function calcular(fat1: number, fat2: number, fat3: number, outrasReceitas: number, p: Premissas) {
   const fat = fat1 + fat2 + fat3
-  const base = fat * p.presuncao
-  const irpj_bruto = base * p.aliq_irpj
-  const adicional_ir = Math.max(0, base - p.limite_adicional) * p.aliq_adicional_ir
+  const presIrpj = p.presuncao ?? 0.32
+  const presCsll = p.presuncao_csll ?? p.presuncao ?? 0.32
+  // Outras receitas entram 100% na base, sem aplicar percentual de presunção
+  const base_irpj = fat * presIrpj + outrasReceitas
+  const base_csll = fat * presCsll + outrasReceitas
+  const irpj_bruto = base_irpj * p.aliq_irpj
+  const adicional_ir = Math.max(0, base_irpj - p.limite_adicional) * p.aliq_adicional_ir
   const irrf_retido = fat * p.aliq_irrf
   const irpj_a_recolher = Math.max(0, irpj_bruto + adicional_ir - irrf_retido)
-  const csll_bruto = base * p.aliq_csll
+  const csll_bruto = base_csll * p.aliq_csll
   const csll_retida = fat * p.aliq_csll_retida
   const csll_a_recolher = Math.max(0, csll_bruto - csll_retida)
   const pis = fat * p.aliq_pis
   const cofins = fat * p.aliq_cofins
-  // Se PIS/COFINS retidos 100% pelo tomador, não geram DARF adicional
   const pis_a_pagar = p.pis_cofins_retidos ? 0 : pis
   const cofins_a_pagar = p.pis_cofins_retidos ? 0 : cofins
   const total_tributos = irpj_a_recolher + csll_a_recolher + pis_a_pagar + cofins_a_pagar
-  // Carga efetiva inclui PIS+COFINS mesmo retidos (são custo real, só pré-coletados)
   const carga_efetiva = fat > 0 ? (irpj_a_recolher + csll_a_recolher + pis + cofins) / fat : 0
   return {
-    fat_total: fat, base_irpj: base,
+    fat_total: fat, base_irpj, base_csll,
     irpj_bruto, adicional_ir, irrf_retido, irpj_a_recolher,
     csll_bruto, csll_retida, csll_a_recolher,
     pis, cofins, total_tributos, carga_efetiva,
@@ -67,7 +79,7 @@ export default function TributosPage() {
   const [fat1, setFat1] = useState(0)
   const [fat2, setFat2] = useState(0)
   const [fat3, setFat3] = useState(0)
-  // Valores originais das NFS-e (para o botão de reset)
+  const [outrasReceitas, setOutrasReceitas] = useState(0)
   const [nfeFat1, setNfeFat1] = useState(0)
   const [nfeFat2, setNfeFat2] = useState(0)
   const [nfeFat3, setNfeFat3] = useState(0)
@@ -93,20 +105,20 @@ export default function TributosPage() {
 
   const carregarFaturamento = useCallback(async () => {
     if (!empresaId) return
-    // Sempre busca os valores das NFS-e (para o botão de reset)
     const nfe = await (api as any).tributos.getFaturamento(empresaId, ano, trimestre)
     const m1 = nfe.mes1 ?? 0
     const m2 = nfe.mes2 ?? 0
     const m3 = nfe.mes3 ?? 0
     setNfeFat1(m1); setNfeFat2(m2); setNfeFat3(m3)
 
-    // Se há trimestre salvo no histórico, carrega os valores gravados
     const hist = await (api as any).tributos.getHistoricoTrimestre(empresaId, ano, trimestre)
     if (hist) {
       setFat1(hist.fat_mes1); setFat2(hist.fat_mes2); setFat3(hist.fat_mes3)
+      setOutrasReceitas(hist.outras_receitas ?? 0)
       setFromHistory(true)
     } else {
       setFat1(m1); setFat2(m2); setFat3(m3)
+      setOutrasReceitas(0)
       setFromHistory(false)
     }
   }, [empresaId, ano, trimestre])
@@ -119,6 +131,7 @@ export default function TributosPage() {
 
   const resetParaNFSe = () => {
     setFat1(nfeFat1); setFat2(nfeFat2); setFat3(nfeFat3)
+    setOutrasReceitas(0)
     setFromHistory(false)
   }
 
@@ -131,7 +144,8 @@ export default function TributosPage() {
     carregarFaturamento()
   }, [carregarFaturamento])
 
-  const resultado = premissas ? calcular(fat1, fat2, fat3, premissas) : null
+  const resultado = premissas ? calcular(fat1, fat2, fat3, outrasReceitas, premissas) : null
+  const presuncaoIgual = premissas ? premissas.presuncao === (premissas.presuncao_csll ?? premissas.presuncao) : true
 
   const salvarTrimestre = async () => {
     if (!empresaId || !premissas || !resultado) return
@@ -144,6 +158,7 @@ export default function TributosPage() {
         fat_mes1: fat1,
         fat_mes2: fat2,
         fat_mes3: fat3,
+        outras_receitas: outrasReceitas,
         observacao: null,
         ...resultado,
       })
@@ -169,6 +184,8 @@ export default function TributosPage() {
     await carregarHistorico()
   }
 
+  const tipoLabel = TIPOS_EMPRESA.find(t => t.value === premissas?.tipo_empresa)?.label ?? 'Serviços'
+
   return (
     <div className="max-w-5xl mx-auto px-6 py-6 pb-16 space-y-6">
       {/* Seleção */}
@@ -191,6 +208,11 @@ export default function TributosPage() {
             </button>
           ))}
         </div>
+        {premissas && (
+          <span className="text-xs text-slate-400 px-2.5 py-1 bg-slate-800 rounded-lg border border-slate-700">
+            {tipoLabel}
+          </span>
+        )}
         <div className="flex-1" />
         <button onClick={() => { setEditPremissas(premissas ? { ...premissas } : null); setModalPremissas(true) }}
           className="flex items-center gap-2 px-3 py-2 text-sm text-slate-300 border border-slate-600 rounded-lg hover:bg-slate-800 transition">
@@ -231,13 +253,33 @@ export default function TributosPage() {
               </div>
             </div>
           ))}
+          {/* Outras Receitas */}
+          <div className="border-t border-slate-700/60 pt-3 space-y-1">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-sm text-slate-400 w-16 shrink-0 leading-tight">Outras<br />Receitas</span>
+              <div className="flex-1 relative">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-500 pointer-events-none select-none">R$</span>
+                <CurrencyInput value={outrasReceitas} onChange={setOutrasReceitas}
+                  className="w-full bg-slate-900 border border-slate-600 rounded-lg pl-9 pr-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500 text-right" />
+              </div>
+            </div>
+            <p className="text-xs text-slate-600">Juros, rendimentos etc. — entram 100% na base, sem percentual de presunção.</p>
+          </div>
+
           <div className="border-t border-slate-700 pt-3 flex items-center justify-between">
-            <span className="text-sm font-medium text-slate-300">Total Trimestral</span>
+            <span className="text-sm font-medium text-slate-300">Total Faturamento</span>
             <span className="text-base font-bold text-white">{fmtBRL(fat1 + fat2 + fat3)}</span>
           </div>
-          {premissas && (
-            <div className="text-xs text-slate-500">
-              Base de cálculo ({fmtPct(premissas.presuncao)} presunção): {resultado ? fmtBRL(resultado.base_irpj) : '-'}
+          {premissas && resultado && (
+            <div className="space-y-0.5 text-xs text-slate-500">
+              {presuncaoIgual ? (
+                <div>Base de cálculo ({fmtPct(premissas.presuncao)} presunção{outrasReceitas > 0 ? ' + outras receitas' : ''}): {fmtBRL(resultado.base_irpj)}</div>
+              ) : (
+                <>
+                  <div>Base IRPJ ({fmtPct(premissas.presuncao)}{outrasReceitas > 0 ? ' + outras receitas' : ''}): {fmtBRL(resultado.base_irpj)}</div>
+                  <div>Base CSLL ({fmtPct(premissas.presuncao_csll)}{outrasReceitas > 0 ? ' + outras receitas' : ''}): {fmtBRL(resultado.base_csll)}</div>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -250,12 +292,18 @@ export default function TributosPage() {
           ) : (
             <>
               <Section label="IRPJ">
+                {!presuncaoIgual && (
+                  <Row label={`Base (${premissas ? fmtPct(premissas.presuncao) : ''} presunção)`} val={resultado.base_irpj} />
+                )}
                 <Row label={`Bruto (${premissas ? fmtPct(premissas.aliq_irpj) : ''})`} val={resultado.irpj_bruto} />
                 <Row label={`Adicional IR (${premissas ? fmtPct(premissas.aliq_adicional_ir) : ''})`} val={resultado.adicional_ir} />
                 <Row label="IRRF retido na fonte" val={resultado.irrf_retido} negative />
                 <RowTotal label="IRPJ a Recolher" val={resultado.irpj_a_recolher} color="text-orange-400" />
               </Section>
               <Section label="CSLL">
+                {!presuncaoIgual && (
+                  <Row label={`Base (${premissas ? fmtPct(premissas.presuncao_csll ?? premissas.presuncao) : ''} presunção)`} val={resultado.base_csll} />
+                )}
                 <Row label={`Bruto (${premissas ? fmtPct(premissas.aliq_csll) : ''})`} val={resultado.csll_bruto} />
                 <Row label="CSLL retida na fonte" val={resultado.csll_retida} negative />
                 <RowTotal label="CSLL a Recolher" val={resultado.csll_a_recolher} color="text-orange-400" />
@@ -369,46 +417,101 @@ export default function TributosPage() {
       {/* Modal Premissas */}
       {modalPremissas && editPremissas && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-slate-800 border border-slate-600 rounded-xl w-full max-w-md p-6 shadow-2xl">
-            <h2 className="text-base font-bold text-slate-100 mb-1">Premissas Tributárias</h2>
-            <p className="text-xs text-slate-500 mb-4">Alíquotas aplicadas ao cálculo de Lucro Presumido. Altere somente com orientação contábil.</p>
-            <div className="space-y-3">
-              {([
-                { key: 'presuncao', label: 'Presunção serviços (%)', hint: 'Normalmente 32% para serviços' },
-                { key: 'aliq_irpj', label: 'Alíquota IRPJ (%)', hint: '15%' },
-                { key: 'aliq_adicional_ir', label: 'Adicional IR (%)', hint: '10% sobre base > limite' },
-                { key: 'limite_adicional', label: 'Limite Adicional IR (R$)', hint: 'R$ 60.000/trimestre', isMoney: true },
-                { key: 'aliq_csll', label: 'Alíquota CSLL (%)', hint: '9%' },
-                { key: 'aliq_pis', label: 'Alíquota PIS (%)', hint: '0,65%' },
-                { key: 'aliq_cofins', label: 'Alíquota COFINS (%)', hint: '3%' },
-                { key: 'aliq_irrf', label: 'IRRF retido pelo tomador (%)', hint: '1,5%' },
-                { key: 'aliq_csll_retida', label: 'CSLL retida pelo tomador (%)', hint: '1%' },
-              ] as { key: keyof Premissas; label: string; hint: string; isMoney?: boolean }[]).map(({ key, label, hint, isMoney }) => (
-                <div key={key} className="flex items-center gap-3">
-                  <label className="text-xs text-slate-400 w-48 shrink-0">{label}</label>
-                  <div className="flex-1 relative">
-                    <input type="number" step={isMoney ? 1000 : 0.0001} min={0}
-                      value={isMoney ? editPremissas[key] : Number((editPremissas[key] as number * 100).toFixed(4))}
-                      onChange={e => setEditPremissas(p => p ? ({ ...p, [key]: isMoney ? Number(e.target.value) : Number(e.target.value) / 100 }) : p)}
-                      className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500" />
-                    {!isMoney && <span className="absolute right-3 top-1.5 text-xs text-slate-500">%</span>}
-                  </div>
-                  <span className="text-xs text-slate-600 w-28 shrink-0">{hint}</span>
+          <div className="bg-slate-800 border border-slate-600 rounded-xl w-full max-w-md shadow-2xl flex flex-col max-h-[88vh]">
+            <div className="px-6 pt-6 pb-3 shrink-0">
+              <h2 className="text-base font-bold text-slate-100 mb-0.5">Premissas Tributárias</h2>
+              <p className="text-xs text-slate-500">Alíquotas aplicadas ao cálculo de Lucro Presumido. Altere somente com orientação contábil.</p>
+            </div>
+
+            <div className="overflow-y-auto px-6 pb-4 space-y-4 flex-1">
+              {/* Tipo de atividade */}
+              <div>
+                <label className="text-xs text-slate-400 block mb-2">Tipo de Atividade</label>
+                <div className="flex gap-2 flex-wrap">
+                  {TIPOS_EMPRESA.map(t => (
+                    <button key={t.value}
+                      onClick={() => setEditPremissas(p => p ? ({
+                        ...p,
+                        tipo_empresa: t.value,
+                        presuncao: t.presuncao,
+                        presuncao_csll: t.presuncao_csll,
+                      }) : p)}
+                      className={`px-3 py-1.5 text-xs rounded-lg border transition font-medium ${
+                        editPremissas.tipo_empresa === t.value
+                          ? 'bg-blue-600 border-blue-500 text-white'
+                          : 'bg-slate-900 border-slate-600 text-slate-400 hover:border-slate-500 hover:text-slate-200'
+                      }`}>
+                      {t.label}
+                    </button>
+                  ))}
                 </div>
-              ))}
-              <div className="border-t border-slate-700 pt-3">
-                <label className="flex items-center gap-3 cursor-pointer">
-                  <input type="checkbox" checked={!!editPremissas.pis_cofins_retidos}
-                    onChange={e => setEditPremissas(p => p ? ({ ...p, pis_cofins_retidos: e.target.checked ? 1 : 0 }) : p)}
-                    className="w-4 h-4 accent-blue-500" />
-                  <div>
-                    <p className="text-xs text-slate-300 font-medium">PIS/COFINS 100% retidos pelo tomador</p>
-                    <p className="text-xs text-slate-500">Marque se os clientes retêm PIS (0,65%) e COFINS (3%) na fonte. DARF de PIS/COFINS será R$ 0,00.</p>
+                <p className="text-xs text-slate-600 mt-1.5">Selecionar o tipo preenche automaticamente os percentuais de presunção abaixo.</p>
+              </div>
+
+              <div className="space-y-3">
+                {/* Presunção IRPJ */}
+                <div className="flex items-center gap-3">
+                  <label className="text-xs text-slate-400 w-48 shrink-0">Presunção IRPJ (%)</label>
+                  <div className="flex-1 relative">
+                    <input type="number" step={0.01} min={0}
+                      value={Number((editPremissas.presuncao * 100).toFixed(4))}
+                      onChange={e => setEditPremissas(p => p ? ({ ...p, presuncao: Number(e.target.value) / 100 }) : p)}
+                      className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500" />
+                    <span className="absolute right-3 top-1.5 text-xs text-slate-500">%</span>
                   </div>
-                </label>
+                  <span className="text-xs text-slate-600 w-28 shrink-0">8% imob · 32% serv.</span>
+                </div>
+                {/* Presunção CSLL */}
+                <div className="flex items-center gap-3">
+                  <label className="text-xs text-slate-400 w-48 shrink-0">Presunção CSLL (%)</label>
+                  <div className="flex-1 relative">
+                    <input type="number" step={0.01} min={0}
+                      value={Number(((editPremissas.presuncao_csll ?? editPremissas.presuncao) * 100).toFixed(4))}
+                      onChange={e => setEditPremissas(p => p ? ({ ...p, presuncao_csll: Number(e.target.value) / 100 }) : p)}
+                      className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500" />
+                    <span className="absolute right-3 top-1.5 text-xs text-slate-500">%</span>
+                  </div>
+                  <span className="text-xs text-slate-600 w-28 shrink-0">12% imob · 32% serv.</span>
+                </div>
+
+                {([
+                  { key: 'aliq_irpj',        label: 'Alíquota IRPJ (%)',            hint: '15%' },
+                  { key: 'aliq_adicional_ir', label: 'Adicional IR (%)',             hint: '10% s/ excedente' },
+                  { key: 'limite_adicional',  label: 'Limite Adicional IR (R$)',     hint: 'R$ 60.000/trim.', isMoney: true },
+                  { key: 'aliq_csll',         label: 'Alíquota CSLL (%)',            hint: '9%' },
+                  { key: 'aliq_pis',          label: 'Alíquota PIS (%)',             hint: '0,65%' },
+                  { key: 'aliq_cofins',       label: 'Alíquota COFINS (%)',          hint: '3%' },
+                  { key: 'aliq_irrf',         label: 'IRRF retido pelo tomador (%)', hint: '1,5%' },
+                  { key: 'aliq_csll_retida',  label: 'CSLL retida pelo tomador (%)', hint: '1%' },
+                ] as { key: keyof Premissas; label: string; hint: string; isMoney?: boolean }[]).map(({ key, label, hint, isMoney }) => (
+                  <div key={key} className="flex items-center gap-3">
+                    <label className="text-xs text-slate-400 w-48 shrink-0">{label}</label>
+                    <div className="flex-1 relative">
+                      <input type="number" step={isMoney ? 1000 : 0.0001} min={0}
+                        value={isMoney ? editPremissas[key] : Number((editPremissas[key] as number * 100).toFixed(4))}
+                        onChange={e => setEditPremissas(p => p ? ({ ...p, [key]: isMoney ? Number(e.target.value) : Number(e.target.value) / 100 }) : p)}
+                        className="w-full bg-slate-900 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-slate-200 focus:outline-none focus:border-blue-500" />
+                      {!isMoney && <span className="absolute right-3 top-1.5 text-xs text-slate-500">%</span>}
+                    </div>
+                    <span className="text-xs text-slate-600 w-28 shrink-0">{hint}</span>
+                  </div>
+                ))}
+
+                <div className="border-t border-slate-700 pt-3">
+                  <label className="flex items-center gap-3 cursor-pointer">
+                    <input type="checkbox" checked={!!editPremissas.pis_cofins_retidos}
+                      onChange={e => setEditPremissas(p => p ? ({ ...p, pis_cofins_retidos: e.target.checked ? 1 : 0 }) : p)}
+                      className="w-4 h-4 accent-blue-500" />
+                    <div>
+                      <p className="text-xs text-slate-300 font-medium">PIS/COFINS 100% retidos pelo tomador</p>
+                      <p className="text-xs text-slate-500">DARF de PIS/COFINS será R$ 0,00 (valores apurados exibidos como referência).</p>
+                    </div>
+                  </label>
+                </div>
               </div>
             </div>
-            <div className="flex gap-3 mt-5 justify-end">
+
+            <div className="flex gap-3 px-6 py-4 border-t border-slate-700 justify-end shrink-0">
               <button onClick={() => setModalPremissas(false)} className="px-4 py-2 text-sm text-slate-400 hover:text-slate-200 border border-slate-600 rounded-lg transition">Cancelar</button>
               <button onClick={salvarPremissas} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-medium transition">Salvar Premissas</button>
             </div>
